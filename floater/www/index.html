@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#071629">
+<title>Floater</title>
+<style>
+@font-face { font-family: "Bungee"; src: url("fonts/bungee-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "Barlow Condensed"; src: url("fonts/barlow-condensed-latin-500-normal.woff2") format("woff2"); font-weight: 500; font-display: block; }
+@font-face { font-family: "Barlow Condensed"; src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-display: block; }
+:root { --night: #071629; color-scheme: dark; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--night);
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+body { display: flex; align-items: center; justify-content: center; }
+canvas { display: block; outline: none; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Floater. Tap to rise."></canvas>
+
+<script>
+(() => {
+  // Logical width is fixed; height follows the device's aspect ratio so the arena fills the screen.
+  const W = 360;
+  let H = 640, FLOOR = 572, CY = 290;
+
+  const C = {
+    night: "#071629", navy: "#0b2c55", blue: "#1f78c8", coral: "#f0532d",
+    gold: "#fcb92f", ink: "#eef4fb", muted: "#8ea7c2",
+    skin: "#7a4a2e", skinDark: "#5c3620", hair: "#1b120d",
+    rival: "#8c1d2c", rivalDark: "#5e1220", rivalSkin: "#c98b5f",
+    wood: "#d39a5b", woodDark: "#b97f43"
+  };
+  const DISPLAY = '"Bungee", "Impact", "Arial Black", sans-serif';
+  const BODY = '"Barlow Condensed", "Arial Narrow", sans-serif';
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Native hooks (present only inside the iOS app)
+  const Cap = window.Capacitor;
+  const isNative = !!(Cap && Cap.isNativePlatform && Cap.isNativePlatform());
+  const plugin = name => (isNative && Cap.Plugins && Cap.Plugins[name]) || null;
+  const Haptics = plugin("Haptics");
+  const buzz = style => { try { Haptics && Haptics.impact({ style }); } catch (e) {} };
+  const thud = () => { try { Haptics && Haptics.notification({ type: "ERROR" }); } catch (e) {} };
+  try { plugin("StatusBar") && plugin("StatusBar").hide(); } catch (e) {}
+  try { plugin("SplashScreen") && plugin("SplashScreen").hide(); } catch (e) {}
+
+  function resize() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    H = Math.round(Math.min(820, Math.max(560, W * vh / vw)));
+    FLOOR = H - 68;
+    CY = Math.round(FLOOR * 0.5);
+    const scale = Math.min(vw / W, vh / H);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    canvas.style.width = Math.round(W * scale) + "px";
+    canvas.style.height = Math.round(H * scale) + "px";
+    canvas.width = Math.round(W * scale * dpr);
+    canvas.height = Math.round(H * scale * dpr);
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+    if (state === "ready") player.y = CY;
+  }
+
+  // Tuning
+  const GRAVITY = 1500, FLAP = -440, SPEED = 155, GAP = 168, SPACING = 215, ARM_W = 64;
+
+  let best = 0;
+  try { best = parseInt(localStorage.getItem("floater-best") || "0", 10) || 0; } catch (e) {}
+
+  let state, player, arms, score, floorX, crowdX, t, flapAnim, flash, newBest;
+
+  function reset() {
+    state = "ready";
+    player = { x: 100, y: CY, vy: 0, r: 17 };
+    arms = [];
+    score = 0;
+    floorX = 0;
+    crowdX = 0;
+    t = 0;
+    flapAnim = 0;
+    flash = 0;
+    newBest = false;
+  }
+
+  function spawnArm(x) {
+    const margin = 70;
+    const top = margin + Math.random() * (FLOOR - GAP - margin * 2);
+    arms.push({ x, top, passed: false, tone: Math.random() < 0.5 ? 0 : 1 });
+  }
+
+  function flap() {
+    if (state === "paused") { state = "play"; return; }
+    if (state === "ready") {
+      state = "play";
+      spawnArm(W + 40);
+    }
+    if (state === "play") {
+      player.vy = FLAP;
+      flapAnim = 1;
+      buzz("LIGHT");
+    } else if (state === "over" && t > 0.6) {
+      reset();
+    }
+  }
+
+  function die() {
+    if (state !== "play") return;
+    state = "over";
+    t = 0;
+    flash = reduceMotion ? 0 : 1;
+    thud();
+    if (score > best) {
+      best = score;
+      newBest = true;
+      try { localStorage.setItem("floater-best", String(best)); } catch (e) {}
+    }
+  }
+
+  function update(dt) {
+    if (state === "paused") return;
+    t += dt;
+    flapAnim = Math.max(0, flapAnim - dt * 4);
+    flash = Math.max(0, flash - dt * 3);
+
+    if (state === "ready") {
+      player.y = CY + Math.sin(t * 3) * 8;
+      floorX = (floorX + SPEED * dt) % 48;
+      crowdX += SPEED * 0.15 * dt;
+      return;
+    }
+
+    if (state === "play" || (state === "over" && player.y < FLOOR - player.r)) {
+      player.vy += GRAVITY * dt;
+      player.y += player.vy * dt;
+    }
+    if (player.y > FLOOR - player.r) {
+      player.y = FLOOR - player.r;
+      die();
+    }
+    if (player.y < player.r) {
+      player.y = player.r;
+      player.vy = 0;
+    }
+
+    if (state !== "play") return;
+
+    floorX = (floorX + SPEED * dt) % 48;
+    crowdX += SPEED * 0.15 * dt;
+
+    for (const a of arms) a.x -= SPEED * dt;
+    if (arms.length && arms[arms.length - 1].x < W - SPACING) spawnArm(W + 40);
+    arms = arms.filter(a => a.x > -ARM_W - 20);
+
+    for (const a of arms) {
+      if (!a.passed && a.x + ARM_W < player.x - player.r) {
+        a.passed = true;
+        score++;
+        buzz("MEDIUM");
+      }
+      // Hitbox: slightly forgiving circle vs rectangles
+      const r = player.r - 3;
+      const inX = player.x + r > a.x + 6 && player.x - r < a.x + ARM_W - 6;
+      if (inX && (player.y - r < a.top || player.y + r > a.top + GAP)) die();
+    }
+  }
+
+  // ---------- Drawing ----------
+  function drawArena() {
+    const g = ctx.createLinearGradient(0, 0, 0, FLOOR);
+    g.addColorStop(0, C.night);
+    g.addColorStop(1, C.navy);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, FLOOR);
+
+    // Arena lights
+    for (let i = 0; i < 5; i++) {
+      const x = 36 + i * 72;
+      const lg = ctx.createRadialGradient(x, 26, 0, x, 26, 60);
+      lg.addColorStop(0, "rgba(252,185,47,.35)");
+      lg.addColorStop(1, "rgba(252,185,47,0)");
+      ctx.fillStyle = lg;
+      ctx.fillRect(x - 60, 0, 120, 90);
+      ctx.fillStyle = "#fff4d6";
+      ctx.fillRect(x - 6, 22, 12, 4);
+    }
+
+    // Crowd: rows of heads, scrolling slowly
+    const colors = [C.blue, C.coral, C.gold, "#16365f", C.blue, "#2a4a73"];
+    // Fill the stands from under the lights down to the scoreboard; taller phones get more rows.
+    const rows = Math.max(6, Math.floor((FLOOR - 70 - 110) / 22));
+    for (let row = 0; row < rows; row++) {
+      const y = 110 + row * 22;
+      const off = (crowdX * (0.6 + row * 0.08)) % 18;
+      for (let x = -18; x < W + 18; x += 18) {
+        const seed = Math.abs(Math.sin((Math.floor((x + crowdX * (0.6 + row * 0.08)) / 18)) * 12.9898 + row * 78.233));
+        const c = colors[Math.floor(seed * 1000) % colors.length];
+        const bob = state === "play" && !reduceMotion ? Math.sin(t * 8 + seed * 20) * 1.5 : 0;
+        ctx.globalAlpha = 0.18 + 0.42 * row / (rows - 1);
+        ctx.fillStyle = c;
+        ctx.beginPath();
+        ctx.arc(x - off + (row % 2) * 9, y + bob, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillRect(x - off + (row % 2) * 9 - 7, y + bob + 5, 14, 10);
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Scoreboard strip
+    ctx.fillStyle = C.blue;
+    ctx.fillRect(0, FLOOR - 46, W, 18);
+    ctx.fillStyle = C.ink;
+    ctx.font = `12px ${DISPLAY}`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    const msg = "FLOATER  •  STAY AIRBORNE  •  BUCKETS ONLY  •  ";
+    const mw = ctx.measureText(msg).width;
+    let sx = -((crowdX * 4) % mw);
+    while (sx < W) { ctx.fillText(msg, sx, FLOOR - 37); sx += mw; }
+    ctx.fillStyle = C.coral;
+    ctx.fillRect(0, FLOOR - 28, W, 4);
+  }
+
+  function drawFloor() {
+    ctx.fillStyle = C.wood;
+    ctx.fillRect(0, FLOOR, W, H - FLOOR);
+    ctx.strokeStyle = C.woodDark;
+    ctx.lineWidth = 2;
+    for (let x = -floorX; x < W + 48; x += 48) {
+      ctx.beginPath();
+      ctx.moveTo(x, FLOOR);
+      ctx.lineTo(x - 30, H);
+      ctx.stroke();
+    }
+    for (let y = FLOOR + 16; y < H; y += 18) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+    ctx.fillStyle = C.blue;
+    ctx.fillRect(0, FLOOR, W, 5);
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(0, FLOOR + 5, W, 2);
+  }
+
+  // A defender's outstretched arm: sleeve column with a spread hand at the gap edge.
+  function drawArm(x, edgeY, dir, tone) {
+    // dir = 1: arm comes from the top and the hand points down. dir = -1: from the floor, hand points up.
+    const sleeve = tone ? C.rival : "#3a3f4a";
+    const sleeveDark = tone ? C.rivalDark : "#262a33";
+    const skin = tone ? C.rivalSkin : "#8f5a3a";
+    const handLen = 34;
+    const wristY = edgeY - dir * handLen;
+    const startY = dir === 1 ? 0 : FLOOR;
+
+    const foreLen = 60;
+    const sleeveEnd = wristY - dir * foreLen;
+    ctx.fillStyle = skin;
+    const fx = x + 12, fw = ARM_W - 24;
+    ctx.fillRect(fx, Math.min(sleeveEnd, wristY), fw, Math.abs(wristY - sleeveEnd));
+
+    ctx.fillStyle = sleeve;
+    ctx.fillRect(x, Math.min(startY, sleeveEnd), ARM_W, Math.abs(sleeveEnd - startY));
+    ctx.fillStyle = sleeveDark;
+    ctx.fillRect(x + ARM_W - 10, Math.min(startY, sleeveEnd), 10, Math.abs(sleeveEnd - startY));
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(x, sleeveEnd - (dir === 1 ? 6 : 0), ARM_W, 6);
+
+    // Wristband
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(fx - 2, wristY - (dir === 1 ? 10 : 0), fw + 4, 10);
+
+    // Palm
+    ctx.fillStyle = skin;
+    const palmH = 16;
+    const palmY = dir === 1 ? wristY : wristY - palmH;
+    roundRect(x + 8, palmY, ARM_W - 16, palmH, 5);
+    ctx.fill();
+    // Fingers
+    const fingerTop = dir === 1 ? wristY + palmH - 3 : edgeY;
+    const fingerH = handLen - palmH + 3;
+    for (let i = 0; i < 4; i++) {
+      const w = 9, gx = x + 10 + i * 11;
+      const len = fingerH - (i === 0 || i === 3 ? 5 : 0);
+      roundRect(gx, dir === 1 ? fingerTop : edgeY + (fingerH - len), w, len, 4);
+      ctx.fill();
+    }
+    // Thumb
+    ctx.save();
+    ctx.translate(x + ARM_W - 8, wristY + dir * 8);
+    ctx.rotate(dir * -0.6);
+    roundRect(-4, dir === 1 ? 0 : -18, 9, 18, 4);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "rgba(0,0,0,.18)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(fx + fw, Math.min(sleeveEnd, wristY));
+    ctx.lineTo(fx + fw, Math.max(sleeveEnd, wristY));
+    ctx.stroke();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // The player: an original cartoon guard in a blue #7 jersey, headband, ball in hand.
+  function drawPlayer() {
+    const p = player;
+    const tilt = state === "ready" ? 0 : Math.max(-0.45, Math.min(1.1, p.vy / 600));
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(tilt);
+
+    const kick = flapAnim;
+
+    // Legs
+    ctx.strokeStyle = C.skin;
+    ctx.lineWidth = 6;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-5, 16); ctx.lineTo(-10 - kick * 6, 30 - kick * 6);
+    ctx.moveTo(5, 16); ctx.lineTo(8 + kick * 4, 31 - kick * 9);
+    ctx.stroke();
+    // Shoes
+    ctx.fillStyle = C.ink;
+    ctx.beginPath(); ctx.ellipse(-12 - kick * 6, 31 - kick * 6, 6, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(10 + kick * 4, 32 - kick * 9, 6, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.coral;
+    ctx.fillRect(-16 - kick * 6, 32 - kick * 6, 8, 2);
+    ctx.fillRect(6 + kick * 4, 33 - kick * 9, 8, 2);
+
+    // Shorts
+    ctx.fillStyle = C.blue;
+    roundRect(-11, 8, 22, 12, 3); ctx.fill();
+    ctx.fillStyle = C.coral;
+    ctx.fillRect(-11, 8, 22, 2);
+
+    // Back arm (flaps)
+    ctx.strokeStyle = C.skinDark;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(-8, -6);
+    ctx.lineTo(-20, -6 - 12 * kick + 8 * (1 - kick));
+    ctx.stroke();
+
+    // Torso / jersey
+    ctx.fillStyle = C.blue;
+    roundRect(-12, -14, 24, 26, 6); ctx.fill();
+    ctx.fillStyle = C.coral;
+    ctx.fillRect(-12, -14, 3, 26);
+    ctx.fillRect(9, -14, 3, 26);
+    ctx.fillStyle = C.ink;
+    ctx.font = `13px ${DISPLAY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("7", 0, -1);
+
+    // Front arm holding the ball
+    ctx.strokeStyle = C.skin;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(8, -6);
+    ctx.lineTo(18, -2 - kick * 10);
+    ctx.stroke();
+    // Ball
+    const bx = 22, by = -4 - kick * 10;
+    ctx.fillStyle = "#e5702a";
+    ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#3a1d0c";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(bx - 7, by); ctx.lineTo(bx + 7, by); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(bx, by - 7); ctx.lineTo(bx, by + 7); ctx.stroke();
+
+    // Head
+    ctx.fillStyle = C.skin;
+    ctx.beginPath(); ctx.arc(0, -24, 10, 0, Math.PI * 2); ctx.fill();
+    // Hair
+    ctx.fillStyle = C.hair;
+    ctx.beginPath(); ctx.arc(0, -27, 10, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
+    // Headband
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(-10, -29, 20, 3.5);
+    // Eye and grin
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(5, -24, 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.hair;
+    ctx.beginPath(); ctx.arc(5.8, -24, 1.2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = C.hair;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(4, -20, 3, 0.1, Math.PI * 0.8); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function outlinedText(text, x, y, size, fill) {
+    ctx.font = `${size}px ${DISPLAY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(4, size / 7);
+    ctx.strokeStyle = C.night;
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fill;
+    ctx.fillText(text, x, y);
+  }
+
+  function pulseAlpha() { return reduceMotion ? 1 : 0.6 + 0.4 * Math.sin(t * 5); }
+
+  function drawHud() {
+    // Keep the score clear of the notch / Dynamic Island on tall phones.
+    const top = H > 700 ? 104 : 72;
+    if (state === "play" || state === "over" || state === "paused") {
+      outlinedText(String(score), W / 2, top, 52, C.ink);
+    }
+
+    if (state === "ready") {
+      outlinedText("FLOATER", W / 2, CY - 150, 50, C.gold);
+      ctx.font = `700 20px ${BODY}`;
+      ctx.fillStyle = C.ink;
+      ctx.textAlign = "center";
+      ctx.fillText("Tap to rise. Slip between the hands.", W / 2, CY + 110);
+      ctx.globalAlpha = pulseAlpha();
+      outlinedText("TAP TO START", W / 2, CY + 150, 20, C.gold);
+      ctx.globalAlpha = 1;
+      if (best > 0) {
+        ctx.font = `500 17px ${BODY}`;
+        ctx.fillStyle = C.muted;
+        ctx.fillText(`Best: ${best} buckets`, W / 2, CY + 186);
+      }
+    }
+
+    if (state === "paused") {
+      ctx.fillStyle = "rgba(7,22,41,.6)";
+      ctx.fillRect(0, 0, W, H);
+      outlinedText("PAUSED", W / 2, CY - 20, 34, C.gold);
+      outlinedText("TAP TO RESUME", W / 2, CY + 24, 16, C.ink);
+    }
+
+    if (state === "over") {
+      const y0 = CY - 100;
+      ctx.fillStyle = "rgba(7,22,41,.88)";
+      roundRect(40, y0, W - 80, 230, 16); ctx.fill();
+      ctx.strokeStyle = C.blue;
+      ctx.lineWidth = 3;
+      roundRect(40, y0, W - 80, 230, 16); ctx.stroke();
+
+      outlinedText("BLOCKED!", W / 2, y0 + 42, 30, C.coral);
+
+      ctx.textAlign = "center";
+      ctx.font = `700 15px ${BODY}`;
+      ctx.fillStyle = C.muted;
+      ctx.fillText("BUCKETS", W / 2 - 64, y0 + 88);
+      ctx.fillText("BEST", W / 2 + 64, y0 + 88);
+      outlinedText(String(score), W / 2 - 64, y0 + 124, 36, C.ink);
+      outlinedText(String(best), W / 2 + 64, y0 + 124, 36, C.gold);
+
+      if (newBest) {
+        ctx.font = `700 17px ${BODY}`;
+        ctx.fillStyle = C.gold;
+        ctx.fillText("New personal best", W / 2, y0 + 162);
+      }
+      if (t > 0.6) {
+        ctx.globalAlpha = pulseAlpha();
+        outlinedText("TAP TO RUN IT BACK", W / 2, y0 + 200, 16, C.ink);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function draw() {
+    drawArena();
+    for (const a of arms) {
+      drawArm(a.x, a.top, 1, a.tone);
+      drawArm(a.x, a.top + GAP, -1, 1 - a.tone);
+    }
+    drawFloor();
+    drawPlayer();
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${flash * 0.6})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+    drawHud();
+  }
+
+  // ---------- Loop & input ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  canvas.addEventListener("pointerdown", e => { e.preventDefault(); canvas.focus(); flap(); });
+  window.addEventListener("keydown", e => {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "Enter") {
+      e.preventDefault();
+      flap();
+    }
+  });
+  // Pause mid-run when the app goes to the background (call, notification, home swipe).
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && state === "play") state = "paused";
+  });
+  window.addEventListener("resize", resize);
+
+  reset();
+  resize();
+  draw();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => draw());
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
