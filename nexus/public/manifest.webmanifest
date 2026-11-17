@@ -1,0 +1,14 @@
+{
+  "name": "Nexus",
+  "short_name": "Nexus",
+  "description": "Household second brain: notes, knowledge base, homelab and shared calendar.",
+  "start_url": "/#/home",
+  "display": "standalone",
+  "background_color": "#111318",
+  "theme_color": "#111318",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }],
+  "shortcuts": [
+    { "name": "Today's note", "url": "/#/daily" },
+    { "name": "Calendar", "url": "/#/calendar" }
+  ]
+}
