@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Nexus</Name>
+  <Repository>ghcr.io/dustinlhowell/nexus:latest</Repository>
+  <Registry>https://github.com/dustinlhowell/OKCREPORTER/pkgs/container/nexus</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/dustinlhowell/OKCREPORTER/issues</Support>
+  <Project>https://github.com/dustinlhowell/OKCREPORTER/tree/main/nexus</Project>
+  <Overview>Household second brain: Obsidian-style linked Markdown notes, Tana-style supertags, Notion-style table/board databases, spaced-repetition flashcards for cert prep, homelab service health checks, and a shared household calendar with Google Calendar / Outlook two-way sync and an ICS feed for your phones. Single container, all data in one SQLite file under /data.</Overview>
+  <Category>Productivity: Tools: HomeAutomation:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/main/nexus/unraid/nexus.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/main/nexus/unraid/icon.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <Requires/>
+  <Config Name="WebUI port" Target="8080" Default="8090" Mode="tcp" Description="Port on your Unraid server for the web UI. 8090 avoids the common 8080 clash with qBittorrent/UniFi." Type="Port" Display="always" Required="true" Mask="false">8090</Config>
+  <Config Name="App data" Target="/data" Default="/mnt/user/appdata/nexus" Mode="rw" Description="Database (nexus.db) and nightly backups (backups/). Include this folder in your appdata backups." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/nexus</Config>
+  <Config Name="Public URL" Target="PUBLIC_URL" Default="" Mode="" Description="Optional. The https address you reach Nexus at from outside, e.g. https://tower.tail1234.ts.net or https://nexus.example.com. Required for Google/Outlook sign-in. Leave empty for LAN-only use." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Google client ID" Target="GOOGLE_CLIENT_ID" Default="" Mode="" Description="Optional. Enables two-way Google Calendar sync (see unraid/README.md)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Google client secret" Target="GOOGLE_CLIENT_SECRET" Default="" Mode="" Description="Optional." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Microsoft client ID" Target="MS_CLIENT_ID" Default="" Mode="" Description="Optional. Enables two-way Outlook / Microsoft 365 sync." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Microsoft client secret" Target="MS_CLIENT_SECRET" Default="" Mode="" Description="Optional." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Microsoft tenant" Target="MS_TENANT" Default="common" Mode="" Description="common = work + personal accounts, consumers = Outlook.com only, or a tenant ID." Type="Variable" Display="advanced" Required="false" Mask="false">common</Config>
+  <Config Name="Backups to keep" Target="BACKUP_KEEP" Default="14" Mode="" Description="Nightly database snapshots kept in /data/backups. 0 disables." Type="Variable" Display="advanced" Required="false" Mask="false">14</Config>
+  <Config Name="Calendar sync interval (min)" Target="SYNC_MINUTES" Default="10" Mode="" Description="How often Google/Outlook/ICS calendars are pulled." Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
+  <Config Name="Service check interval (s)" Target="HEALTH_SECONDS" Default="120" Mode="" Description="How often #service URLs are pinged." Type="Variable" Display="advanced" Required="false" Mask="false">120</Config>
+</Container>

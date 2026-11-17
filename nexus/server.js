@@ -1,7 +1,7 @@
 // Nexus – self-hosted notes + knowledge base + household calendar. Zero npm dependencies.
 import http from 'node:http';
 import https from 'node:https';
-import { readFileSync, readdirSync, mkdirSync, statSync, watch } from 'node:fs';
+import { readFileSync, readdirSync, mkdirSync, statSync, watch, unlinkSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
@@ -19,7 +19,8 @@ const PORT = +(process.env.PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA = process.env.DATA_DIR || join(ROOT, 'data');
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
-const SECURE_COOKIE = process.env.COOKIE_SECURE === '1' || PUBLIC_URL.startsWith('https://');
+// Mark cookies Secure only when this request arrived over HTTPS, so LAN access over http://tower:port keeps working.
+const isHttps = (req) => process.env.COOKIE_SECURE === '1' || req.socket.encrypted || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 const SESSION_DAYS = 60;
 
 mkdirSync(DATA, { recursive: true });
@@ -139,10 +140,10 @@ function createUser({ name, email, password, color }) {
   });
 }
 
-function newSession(res, uid) {
+function newSession(req, res, uid) {
   const t = token(32);
   q('INSERT INTO sessions(token, user_id, expires) VALUES (?, ?, ?)').run(t, uid, Date.now() + SESSION_DAYS * DAY);
-  res.setHeader('set-cookie', `sid=${t}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${SECURE_COOKIE ? '; Secure' : ''}`);
+  res.setHeader('set-cookie', `sid=${t}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${isHttps(req) ? '; Secure' : ''}`);
 }
 
 function getNote(id, uid) {
@@ -295,7 +296,7 @@ const route = (method, path, handler, opts = {}) => {
 
 route('GET', '/api/status', () => ({ setup: q('SELECT COUNT(*) c FROM users').get().c === 0 }), { public: true });
 
-route('POST', '/api/setup', ({ body, res }) => {
+route('POST', '/api/setup', ({ body, req, res }) => {
   if (q('SELECT COUNT(*) c FROM users').get().c) throw new HttpError(403, 'Already set up');
   const uid = createUser(body);
   tx(() => {
@@ -303,7 +304,7 @@ route('POST', '/api/setup', ({ body, res }) => {
     for (const s of SUPERTAGS) q('INSERT OR IGNORE INTO supertags(name, color, icon, fields, template, folder) VALUES (?, ?, ?, ?, ?, ?)').run(s.name, s.color, s.icon, JSON.stringify(s.fields), s.template, s.folder);
     for (const n of NOTES) saveNote(uid, n);
   });
-  newSession(res, uid);
+  newSession(req, res, uid);
   return { ok: true };
 }, { public: true });
 
@@ -317,7 +318,7 @@ route('POST', '/api/login', ({ body, res, req }) => {
     throw new HttpError(401, 'Wrong email or password');
   }
   loginAttempts.delete(ip);
-  newSession(res, u.id);
+  newSession(req, res, u.id);
   return { ok: true };
 }, { public: true });
 
@@ -735,6 +736,20 @@ const server = http.createServer(async (req, res) => {
 });
 
 // ---------------------------------------------------------------- background jobs
+// Nightly consistent snapshot (VACUUM INTO) to DATA_DIR/backups, keeping the newest BACKUP_KEEP files.
+async function backup() {
+  const keep = +(process.env.BACKUP_KEEP ?? 14);
+  if (!keep) return;
+  const dir = join(DATA, 'backups');
+  mkdirSync(dir, { recursive: true });
+  const name = `nexus-${new Date().toLocaleDateString('sv')}.db`;
+  const files = readdirSync(dir).filter((f) => /^nexus-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort();
+  if (files.includes(name)) return;
+  store.db.exec(`VACUUM INTO '${join(dir, name).replace(/'/g, "''")}'`);
+  for (const f of files.concat(name).slice(0, -keep)) unlinkSync(join(dir, f));
+  console.log(`[backup] wrote ${name}`);
+}
+
 async function syncAll() {
   for (const c of q("SELECT * FROM calendars WHERE kind != 'local'").all()) {
     try { await syncCalendar(store, c); } catch (e) { console.warn(`[sync] ${c.name}: ${e.message}`); }
@@ -745,6 +760,8 @@ if (process.env.NODE_ENV !== 'test') {
   setInterval(syncAll, +(process.env.SYNC_MINUTES || 10) * 60000).unref();
   setInterval(() => checkServices().catch(() => {}), +(process.env.HEALTH_SECONDS || 120) * 1000).unref();
   setInterval(() => q('DELETE FROM sessions WHERE expires < ?').run(Date.now()), 3600000).unref();
+  setInterval(() => backup().catch((e) => console.warn(`[backup] ${e.message}`)), 3600000).unref();
+  setTimeout(() => backup().catch((e) => console.warn(`[backup] ${e.message}`)), 60000).unref();
   setTimeout(() => { syncAll(); checkServices().catch(() => {}); }, 3000).unref();
 }
 

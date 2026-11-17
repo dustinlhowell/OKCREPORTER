@@ -15,6 +15,10 @@ Nexus has no npm dependencies. It is one Node.js process with the SQLite built i
 
 ## Quick start
 
+### Unraid
+
+See **[unraid/README.md](unraid/README.md)**. It covers a ready-made Docker template, prebuilt images on GHCR, Tailscale or Cloudflare remote access, and backups.
+
 ### Docker (recommended for a home server)
 
 ```bash
@@ -133,11 +137,12 @@ Google and Microsoft only accept sign-in redirects to **https** URLs or `localho
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_TENANT` | — / — / `common` | Outlook sync |
 | `SYNC_MINUTES` | `10` | Interval for calendar pulls |
 | `HEALTH_SECONDS` | `120` | Interval for service health checks |
-| `COOKIE_SECURE` | auto | Set to `1` to force `Secure` cookies |
+| `BACKUP_KEEP` | `14` | Nightly snapshots kept in `DATA_DIR/backups`. `0` turns them off. |
+| `COOKIE_SECURE` | auto | Cookies are marked `Secure` when a request arrives over HTTPS (directly or through a proxy's `X-Forwarded-Proto`). Set to `1` to force it. |
 
 ## Backup
 
-Everything is in `data/nexus.db` (with `-wal`/`-shm` files next to it while the server runs). Two ways to back it up:
+Everything is in `data/nexus.db` (with `-wal`/`-shm` files next to it while the server runs). Nexus also writes a consistent snapshot to `data/backups/` every night. To make one yourself:
 
 ```bash
 sqlite3 data/nexus.db ".backup 'nexus-$(date +%F).db'"   # safe while running
