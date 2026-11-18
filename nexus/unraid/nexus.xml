@@ -8,12 +8,12 @@
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/dustinlhowell/OKCREPORTER/issues</Support>
-  <Project>https://github.com/dustinlhowell/OKCREPORTER/tree/main/nexus</Project>
+  <Project>https://github.com/dustinlhowell/OKCREPORTER/tree/HEAD/nexus</Project>
   <Overview>Household second brain: Obsidian-style linked Markdown notes, Tana-style supertags, Notion-style table/board databases, spaced-repetition flashcards for cert prep, homelab service health checks, and a shared household calendar with Google Calendar / Outlook two-way sync and an ICS feed for your phones. Single container, all data in one SQLite file under /data.</Overview>
   <Category>Productivity: Tools: HomeAutomation:</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/main/nexus/unraid/nexus.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/main/nexus/unraid/icon.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/HEAD/nexus/unraid/nexus.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/HEAD/nexus/unraid/icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs/>
   <CPUset/>

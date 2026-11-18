@@ -18,10 +18,11 @@ The GitHub Action in `.github/workflows/nexus-image.yml` builds the image and pu
 
 | Branch | Image tag |
 | --- | --- |
-| `main` | `:latest` (the tag the Unraid template uses) |
+| the repo's default branch (currently `floater-ios`) | `:latest` (the tag the Unraid template uses) |
 | any other branch | `:<branch-name>`, with `/` replaced by `-` |
 
-1. Merge the Nexus branch into `main`, or start the workflow by hand: **Actions → Nexus Docker image → Run workflow**.
+1. Merge the Nexus branch into the repo's default branch (currently `floater-ios`):
+   open https://github.com/dustinlhowell/OKCREPORTER/compare/floater-ios...claude/zealous-babbage-5d7nu7, click **Create pull request**, then **Merge pull request**.
 2. The first time a package is published, GitHub makes it **private**. Make it public:
    GitHub → your profile → **Packages → nexus → Package settings → Change visibility → Public**.
    The image only contains the app code; your data is never part of it.
@@ -38,7 +39,7 @@ Open **Unraid web UI → Terminal** (the `>_` icon, top right) and paste:
 ```bash
 mkdir -p /boot/config/plugins/dockerMan/templates-user /mnt/user/appdata/nexus
 wget -qO /boot/config/plugins/dockerMan/templates-user/my-Nexus.xml \
-  https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/main/nexus/unraid/nexus.xml
+  https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/HEAD/nexus/unraid/nexus.xml
 echo "Template installed"
 ```
 
@@ -134,7 +135,7 @@ To enter the IDs and secrets: edit the container, click **Show more settings**, 
 
 ## Updating
 
-When new code is pushed to `main`, the Docker tab shows **update ready** next to Nexus. Click **apply update**. The database is migrated in place, and your data stays in appdata.
+When new code is pushed to the default branch, the Docker tab shows **update ready** next to Nexus. Click **apply update**. The database is migrated in place, and your data stays in appdata.
 
 ## Backups and restore
 
@@ -164,7 +165,7 @@ When new code is pushed to `main`, the Docker tab shows **update ready** next to
 This doesn't need GitHub Actions or a registry. In the Unraid terminal:
 
 ```bash
-BRANCH=main   # or claude/zealous-babbage-5d7nu7 to try the branch before merging
+BRANCH=floater-ios   # the default branch; or claude/zealous-babbage-5d7nu7 to try the branch before merging
 mkdir -p /mnt/user/appdata/nexus-src && cd /mnt/user/appdata/nexus-src
 wget -qO- "https://github.com/dustinlhowell/OKCREPORTER/archive/refs/heads/${BRANCH}.tar.gz" | tar xz --strip-components=1
 docker build -t nexus:local nexus
