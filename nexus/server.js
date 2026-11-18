@@ -309,7 +309,8 @@ route('POST', '/api/setup', ({ body, req, res }) => {
 }, { public: true });
 
 route('POST', '/api/login', ({ body, res, req }) => {
-  const ip = req.socket.remoteAddress;
+  // Behind Cloudflare Tunnel / a reverse proxy every request comes from the proxy, so key the lockout on the real client IP.
+  const ip = String(req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress);
   const a = loginAttempts.get(ip) || { n: 0, until: 0 };
   if (a.until > Date.now()) throw new HttpError(429, 'Too many attempts – try again in a minute');
   const u = q('SELECT * FROM users WHERE email = ?').get(String(body.email || '').trim());
