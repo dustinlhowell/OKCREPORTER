@@ -120,6 +120,14 @@ Then set **Public URL** to the https address. Nexus reads `X-Forwarded-Proto` fr
 
 ---
 
+## Ask Claude (optional)
+
+1. Create an API key at **console.anthropic.com → API keys**.
+2. Add credits under **Billing**, and set a monthly spend limit while you're there.
+3. In Unraid, go to **Docker → Nexus → Edit**, paste the key into **Anthropic API key**, and click **Apply**.
+
+**✨ Ask Claude** then works in the sidebar and on every note. Each question's token usage shows up in the container's **Logs**. Model and effort are under **Show more settings**. The [app README](../README.md#ask-claude) covers what it can do, cost and privacy.
+
 ## Google / Outlook two-way sync
 
 Once Public URL is set to an https address, create the OAuth apps. The steps are in the [main README](../README.md#calendar-integrations-oauth). Use these redirect URIs:
