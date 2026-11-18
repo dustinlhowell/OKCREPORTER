@@ -114,12 +114,38 @@ Google and Microsoft only accept sign-in redirects to **https** URLs or `localho
 4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, then restart.
 
 **Outlook / Microsoft 365**
-1. Go to [entra.microsoft.com](https://entra.microsoft.com) → **App registrations → New registration**.
-   - Account types: *Any organizational directory and personal Microsoft accounts*.
-   - Redirect URI (Web): `https://YOUR-HOST/api/oauth/outlook/callback`
-2. **Certificates & secrets → New client secret.**
-3. **API permissions → Microsoft Graph → Delegated**: `Calendars.ReadWrite`, `offline_access`, `User.Read`.
-4. Set `MS_CLIENT_ID` and `MS_CLIENT_SECRET`, then restart. Set `MS_TENANT` only if you need to: `consumers` limits sign-in to Outlook.com accounts, and a tenant ID limits it to a single organization.
+
+Microsoft registers every app inside an Entra "directory". Work and school accounts already have one. A **personal** Outlook.com, Hotmail or Live account doesn't, so do step 0 first.
+
+0. *(Personal accounts only)* Go to [azure.microsoft.com/free](https://azure.microsoft.com/free) and sign up with your Microsoft account. That creates a "Default Directory" for you. Signup usually asks for a phone number and a card for identity verification. App registrations themselves are free.
+1. Go to [entra.microsoft.com](https://entra.microsoft.com) (or portal.azure.com) → **App registrations → New registration**:
+   - **Name:** `Nexus`
+   - **Supported account types:** pick **Personal Microsoft accounts only** for Outlook.com/Hotmail. Pick *Any organizational directory and personal Microsoft accounts* to also allow work accounts.
+   - **Redirect URI:** platform **Web**, address `https://YOUR-HOST/api/oauth/outlook/callback`
+2. On the **Overview** page, copy the **Application (client) ID**. That's `MS_CLIENT_ID`.
+3. Go to **Certificates & secrets → New client secret** (24 months). Copy the **Value** column right away; that's `MS_CLIENT_SECRET`. Don't copy the "Secret ID", which is a different thing. The secret expires, so set a reminder to replace it.
+4. Go to **API permissions → Add a permission → Microsoft Graph → Delegated permissions** and add `Calendars.ReadWrite`, `offline_access` and `User.Read`. Personal accounts don't need admin consent.
+5. Set `MS_CLIENT_ID` and `MS_CLIENT_SECRET`. Then set `MS_TENANT` to match the account type you chose in step 1:
+   - **Personal accounts only:** `consumers` (required)
+   - **Work and personal:** `common` (the default)
+   - **One organization only:** that organization's tenant ID
+
+   Restart Nexus.
+6. In Nexus, go to **Settings → Calendars → Connect Outlook / Microsoft 365** and sign in. You should see a row labeled *Outlook · two-way · synced just now*. If you'd previously added the same calendar as an ICS link, delete that row so events don't appear twice.
+
+**Check it works:** create an event in Nexus on the calendar marked **(outlook)**. It should appear in Outlook within seconds. Then create one in Outlook and click **Sync** in Nexus; it should appear there. Edits and deletes made in Nexus are sent to Outlook straight away. Changes made in Outlook arrive at the next sync, which runs every 10 minutes or when you click Sync.
+
+| Error | Fix |
+| --- | --- |
+| `AADSTS50011` (redirect URI mismatch) | The redirect address in step 1 must exactly match `PUBLIC_URL` + `/api/oauth/outlook/callback`. |
+| `AADSTS50020` / `unauthorized_client` / "not enabled for consumers" | `MS_TENANT` doesn't match the account type chosen in step 1 (see step 5). |
+| `invalid_client` / `AADSTS7000215` | The secret is wrong or has expired. Create a new one and paste its **Value**. |
+
+**No-setup alternative:** if you'd rather skip the app registration, use two read-only links instead.
+- **Outlook → Nexus:** in outlook.com, go to *Settings → Calendar → Shared calendars → Publish a calendar → ICS link*, and add that link in Nexus with **Subscribe to ICS URL**.
+- **Nexus → Outlook:** in outlook.com, go to *Add calendar → Subscribe from web* and paste the Nexus **Household feed** link.
+
+The catches: Outlook only refreshes subscribed calendars every few hours, and neither side can edit the other's events.
 
 > Some employers block third-party apps on work Microsoft 365 accounts. If yours does, publish your work calendar as ICS and use **Subscribe to ICS URL**.
 
