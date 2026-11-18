@@ -426,5 +426,8 @@ body.auth { display: grid; place-items: center; min-height: 100vh; padding: 16px
 .csugg .btn { white-space: normal; text-align: left; font-size: 13px; }
 .cinput { display: flex; gap: 8px; align-items: flex-end; border: 1px solid var(--line); background: var(--panel); border-radius: 14px; padding: 8px; }
 .cinput textarea { flex: 1; border: 0 !important; box-shadow: none !important; resize: none; background: transparent; max-height: 200px; }
+.csrc { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.csrc b { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--mute); }
+.csrc a span { color: var(--mute); margin-left: 6px; font-size: 12px; }
 .cfoot { font-size: 11px; text-align: center; margin: 6px 0 0; }
 @media (max-width: 760px) { .claude { padding: 10px 12px 8px; } }

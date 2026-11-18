@@ -10,6 +10,7 @@ const SUGGESTIONS = [
   'Summarize what I wrote in my notes this week',
   'Turn my notes on resetting MFA into a step-by-step runbook',
   'Add a dentist appointment for me next Tuesday at 3pm',
+  "What's new in the latest Proxmox VE release, and does it affect my setup?",
 ];
 
 export async function viewClaude(main, app, params) {
@@ -44,10 +45,10 @@ export async function viewClaude(main, app, params) {
   };
   const bubble = (m, i) => m.role === 'user'
     ? `<div class="cmsg user"><div class="cb">${esc(m.text).replace(/\n/g, '<br>')}</div></div>`
-    : `<div class="cmsg bot" data-i="${i}">${(m.tools || []).map((t) => `<div class="ctool">${esc(t)}</div>`).join('')}<div class="cb md">${m.text ? render(m.text, app.mdctx()) : ''}${m.pending ? '<span class="dots"><i></i><i></i><i></i></span>' : ''}${m.error ? `<div class="cerr">⚠ ${esc(m.error)}</div>` : ''}</div></div>`;
+    : `<div class="cmsg bot" data-i="${i}">${(m.tools || []).map((t) => `<div class="ctool">${esc(t)}</div>`).join('')}<div class="cb md">${m.text ? render(m.text, app.mdctx()) : ''}${m.pending ? '<span class="dots"><i></i><i></i><i></i></span>' : ''}${m.error ? `<div class="cerr">⚠ ${esc(m.error)}</div>` : ''}${m.sources?.length ? `<div class="csrc"><b>Sources</b>${m.sources.map((x) => { let h = ''; try { h = new URL(x.url).hostname.replace(/^www\./, ''); } catch {} return `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}<span>${esc(h)}</span></a>`; }).join('')}</div>` : ''}</div></div>`;
   const draw = () => {
     msgs.innerHTML = chat.length ? chat.map(bubble).join('')
-      : `<div class="cempty"><p>Ask anything about your notes, calendar or homelab. Claude can also create notes, flashcards and events.</p>
+      : `<div class="cempty"><p>Ask anything about your notes, calendar or homelab, or something on the web. Claude can also create notes, flashcards and events.</p>
          <div class="csugg">${SUGGESTIONS.map((s) => `<button class="btn">${esc(s)}</button>`).join('')}</div></div>`;
     msgs.scrollTop = msgs.scrollHeight;
   };
@@ -90,6 +91,7 @@ export async function viewClaude(main, app, params) {
           else if (ev.type === 'text_start' && bot.text && !bot.text.endsWith('\n')) bot.text += '\n\n';
           else if (ev.type === 'tool') bot.tools.push(ev.label);
           else if (ev.type === 'error') bot.error = ev.message;
+          else if (ev.type === 'sources') bot.sources = ev.items;
           redraw();
         }
       }

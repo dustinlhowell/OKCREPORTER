@@ -90,6 +90,12 @@ Any note tagged `#service` that has a `url::` property is pinged every 2 minutes
 - *"Which homelab services are down, and what do my runbooks say to do?"*
 - *"Turn my notes on resetting MFA into a #kb article."*
 
+**Web access:** Claude can also search the web and read web pages, for example *"What changed in the latest Proxmox release?"* or *"Find the current AZ-104 exam objectives and update my study plan."* Answers that use the web end with a list of **Sources**.
+- These searches run on Anthropic's side, so nothing new is exposed on your server.
+- Web pages are treated as untrusted: Claude won't edit your notes or calendar because a page told it to.
+- Set `CLAUDE_WEB=off` to keep it to notes and calendar only.
+- Web search may need to be enabled for your organization in the Anthropic Console (**Settings → Privacy**) before it works.
+
 Claude acts as whoever is signed in. It sees only the notes that person can see, so private notes stay private. It can search, read, create and append to notes, make small find-and-replace edits, read the calendar and add events, including to a connected Google or Outlook calendar. It has no tools for deleting anything. When it creates or changes something, the chat says so and links to it.
 
 **Setup:** create an API key at [console.anthropic.com](https://console.anthropic.com/settings/keys), add credits under **Billing**, and set `ANTHROPIC_API_KEY` on the container.
@@ -184,6 +190,7 @@ The catches: Outlook only refreshes subscribed calendars every few hours, and ne
 | `TZ` | system | Time zone for ICS events that have no zone ("floating" times) |
 | `ANTHROPIC_API_KEY` | — | Turns on **Ask Claude** |
 | `CLAUDE_MODEL` / `CLAUDE_EFFORT` | `claude-opus-5-5` / `medium` | Model and thinking effort for Ask Claude |
+| `CLAUDE_WEB` | `on` | Let Ask Claude search the web and read pages (`off` to disable) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google Calendar sync |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_TENANT` | — / — / `common` | Outlook sync |
 | `SYNC_MINUTES` | `10` | Interval for calendar pulls |
