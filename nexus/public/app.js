@@ -46,6 +46,9 @@ const emit = (t, d) => listeners[t]?.forEach((f) => f(d));
 const state = { me: null, users: [], notes: [], byId: new Map(), byTitle: new Map(), supertags: [], calendars: [], integrations: {}, tagCounts: [], due: 0 };
 const app = { api, state, toast, modal, emit, on, go: (p) => { location.hash = '#' + p; }, userById: (id) => state.users.find((u) => u.id === +id) };
 window.nexus = app;
+app.mdctx = (extra) => mdctx(extra);
+app.openByTitle = (t) => openByTitle(t);
+app.setTitle = (t) => setTitle(t);
 
 function setNotes(list) {
   state.notes = list;
@@ -124,7 +127,7 @@ function renderSidebar() {
   if (!$('#nav')) return;
   const route = location.hash.slice(1) || '/home';
   const navItem = (href, icon, label, badge) => `<a href="#${href}" class="${route.startsWith(href) ? 'active' : ''}"><span class="ni">${icon}</span>${label}${badge ? `<span class="badge">${badge}</span>` : ''}</a>`;
-  $('#nav').innerHTML = navItem('/home', '🏠', 'Home') + navItem('/calendar', '📅', 'Calendar') + `<a href="#/daily" class="${route.startsWith('/daily') ? 'active' : ''}"><span class="ni">📓</span>Today's note</a>` +
+  $('#nav').innerHTML = navItem('/home', '🏠', 'Home') + navItem('/calendar', '📅', 'Calendar') + navItem('/claude', '✨', 'Ask Claude') + `<a href="#/daily" class="${route.startsWith('/daily') ? 'active' : ''}"><span class="ni">📓</span>Today's note</a>` +
     navItem('/tasks', '✅', 'Tasks') + navItem('/review', '🃏', 'Review', state.due || '') + navItem('/graph', '🕸️', 'Graph') + navItem('/settings', '⚙️', 'Settings');
 
   const counts = new Map(state.tagCounts.map((t) => [t.tag, t.count]));
@@ -190,6 +193,7 @@ async function route() {
     else if (h.startsWith('/tasks')) await viewTasks(main);
     else if (h.startsWith('/review')) await viewReview(main, new URLSearchParams(h.split('?')[1] || ''));
     else if (h.startsWith('/graph')) await viewGraph(main);
+    else if (h.startsWith('/claude')) { const { viewClaude } = await import('./claude.js'); current = { name: 'claude', ...(await viewClaude(main, app, new URLSearchParams(h.split('?')[1] || ''))) }; }
     else if (h.startsWith('/settings')) await viewSettings(main, new URLSearchParams(h.split('?')[1] || ''));
     else await viewHome(main);
   } catch (err) {
@@ -254,6 +258,7 @@ async function viewNote(main, id) {
   main.innerHTML = `<div class="note">
     <div class="ntop"><span class="crumb" title="Move to folder">📁 ${esc(n.folder || 'Notes')}</span><span class="status" id="saveState"></span><span class="sp"></span>
       <div class="seg" id="modeSeg">${['edit', 'split', 'read'].map((m) => `<button data-m="${m}">${m[0].toUpperCase() + m.slice(1)}</button>`).join('')}</div>
+      <a class="iconbtn" href="#/claude?note=${n.id}" title="Ask Claude about this note">✨</a>
       <button class="iconbtn" id="pinBtn" title="Pin">${n.pinned ? '📌' : '📍'}</button>
       <button class="iconbtn" id="moreBtn" title="More">⋯</button></div>
     <div id="conflict"></div>
@@ -808,6 +813,7 @@ const COMMANDS = [
   { label: 'Open graph view', icon: '🕸️', run: () => app.go('/graph') },
   { label: 'Settings', icon: '⚙️', run: () => app.go('/settings') },
   { label: 'New supertag', icon: '🏷️', run: () => editSupertag(null) },
+  { label: 'Ask Claude', icon: '✨', run: () => app.go('/claude') },
   { label: 'Toggle theme', icon: '◐', run: () => $('#themeBtn').click() },
 ];
 function palette() {
@@ -826,6 +832,7 @@ function palette() {
       const cm = qy ? cmds.map((x) => ({ ...x, s: fuzzy(qy, x.label) })).filter((x) => x.s > 20).slice(0, 3) : [];
       results = [...notes, ...cm];
       if (qy && !exists(qy)) results.push({ label: `Create “${qy}”`, icon: '＋', run: () => newNote({ title: qy }) });
+      if (qy.length > 3 && state.claude?.configured) results.push({ label: `Ask Claude: “${qy}”`, icon: '✨', run: () => app.go(`/claude?q=${encodeURIComponent(qy)}`) });
       sel = 0; draw();
       if (qy.length >= 2) {
         const seq = ++ftsSeq;
@@ -880,7 +887,7 @@ document.addEventListener('keydown', (e) => {
 // ------------------------------------------------------------------ boot
 async function boot(refreshOnly = false) {
   const me = await api('GET', '/api/me');
-  state.me = me.user; state.users = me.users; state.integrations = me.integrations;
+  state.me = me.user; state.users = me.users; state.integrations = me.integrations; state.claude = me.claude;
   if (refreshOnly) { renderSidebar(); return; }
   shell(); applyTheme();
   await Promise.all([loadNotes(), loadMeta()]);

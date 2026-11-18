@@ -2,7 +2,9 @@ FROM node:22-alpine
 ENV NODE_ENV=production PORT=8080 DATA_DIR=/data
 WORKDIR /app
 RUN mkdir -p /data
-COPY package.json server.js ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY server.js ./
 COPY lib ./lib
 COPY public ./public
 VOLUME /data

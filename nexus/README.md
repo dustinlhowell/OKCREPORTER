@@ -9,7 +9,7 @@ A self-hosted second brain for a household. It combines what Obsidian, Tana and 
 | **Notion** | Every tag is a live **database**, viewable as a table (sortable, filterable, editable in place) or a **board** you can drag cards across. Also slash commands and callouts. |
 | **Extras** | Spaced-repetition **flashcards** for cert prep, tasks with due dates on the calendar, **homelab health checks**, and a **household calendar** with Google and Outlook sync. |
 
-Nexus has no npm dependencies. It is one Node.js process with the SQLite built into Node: FTS5 full-text search, WAL mode and prepared statements. The frontend is vanilla JavaScript with no build step, and assets are precompressed with Brotli. With 5,000 notes, every API call takes under 35 ms and search takes about 20 ms.
+Nexus is one Node.js process (its only npm dependencies are the official Anthropic SDK and Zod, used by Ask Claude) with the SQLite built into Node: FTS5 full-text search, WAL mode and prepared statements. The frontend is vanilla JavaScript with no build step, and assets are precompressed with Brotli. With 5,000 notes, every API call takes under 35 ms and search takes about 20 ms.
 
 ---
 
@@ -80,6 +80,29 @@ Any note tagged `#service` that has a `url::` property is pinged every 2 minutes
 **Review** uses an SM-2 style scheduler with four grades: Again, Hard, Good and Easy, on keys 1–4. You can study all due cards, or cram the cards in a single note. A card keeps its review schedule when you edit its answer.
 
 ---
+
+## Ask Claude
+
+**✨ Ask Claude** in the sidebar is a chat with Claude that can work with everything in Nexus. You can also click ✨ on any note to ask about that note, or type a question in Ctrl+K and pick *Ask Claude*. For example:
+
+- *"What's on our calendar this week?"* or *"Add a dentist appointment for Sarah next Tuesday at 3pm."*
+- *"Quiz me on my AZ-104 notes"* or *"Make flashcards from this note."*
+- *"Which homelab services are down, and what do my runbooks say to do?"*
+- *"Turn my notes on resetting MFA into a #kb article."*
+
+Claude acts as whoever is signed in. It sees only the notes that person can see, so private notes stay private. It can search, read, create and append to notes, make small find-and-replace edits, read the calendar and add events, including to a connected Google or Outlook calendar. It has no tools for deleting anything. When it creates or changes something, the chat says so and links to it.
+
+**Setup:** create an API key at [console.anthropic.com](https://console.anthropic.com/settings/keys), add credits under **Billing**, and set `ANTHROPIC_API_KEY` on the container.
+- A Claude.ai Pro or Max subscription **can't** be used here. Apps call Claude through Anthropic's API, which is a separate pay-as-you-go account.
+- Set a monthly **spend limit** in the Console so the cost can never surprise you.
+
+**Cost:** each question is billed by the amount of text sent and received. With the default model (Claude Opus 5.5) a typical question costs roughly 3–15¢. Questions that read many long notes cost more. The Unraid container's log (Docker → Nexus → Logs) prints the token count for every question.
+- To spend less, set `CLAUDE_MODEL` to `claude-sonnet-5-5` (about half the price) or `claude-haiku-5-5` (much cheaper, less capable).
+- `CLAUDE_EFFORT` (`low`, `medium` or `high`) controls how hard it thinks.
+
+**Privacy:** the notes and events Claude reads to answer a question are sent to Anthropic's API. Nothing is sent until someone asks Claude something. If a note is too sensitive for that, keep it out of the conversation, or don't enable Ask Claude.
+
+**How it works:** Nexus uses the official Anthropic SDK's tool runner on the Messages API. The conversation loop runs on your own server, and the chat history stays in your browser.
 
 ## Shared calendar
 
@@ -159,6 +182,8 @@ The catches: Outlook only refreshes subscribed calendars every few hours, and ne
 | `DATA_DIR` | `./data` | Location of `nexus.db` |
 | `PUBLIC_URL` | (derived from request) | External https URL. Required for OAuth, and enables `Secure` cookies. |
 | `TZ` | system | Time zone for ICS events that have no zone ("floating" times) |
+| `ANTHROPIC_API_KEY` | — | Turns on **Ask Claude** |
+| `CLAUDE_MODEL` / `CLAUDE_EFFORT` | `claude-opus-5-5` / `medium` | Model and thinking effort for Ask Claude |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google Calendar sync |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_TENANT` | — / — / `common` | Outlook sync |
 | `SYNC_MINUTES` | `10` | Interval for calendar pulls |

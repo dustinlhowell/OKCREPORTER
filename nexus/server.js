@@ -13,6 +13,7 @@ import { generateICS } from './lib/ics.js';
 import { PROVIDERS, providerConfigured, authorizeUrl, exchangeCode, syncCalendar, pushEvent, deleteRemote, listRemoteCalendars } from './lib/calendar.js';
 import { SUPERTAGS, NOTES } from './lib/seed.js';
 import { DAY } from './lib/time.js';
+import * as assistant from './lib/assistant.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PORT = +(process.env.PORT || 8080);
@@ -330,6 +331,7 @@ route('POST', '/api/logout', ({ req, res }) => {
 });
 
 route('GET', '/api/me', ({ user }) => ({
+  claude: { configured: assistant.configured(), model: assistant.MODEL },
   user, users: q(`SELECT id, name, color FROM users ORDER BY id`).all(),
   integrations: Object.fromEntries(Object.entries(PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: providerConfigured(k) }])),
 }));
@@ -542,15 +544,16 @@ function eventInput(b, cal) {
   return { title: b.title.trim(), start, end, all_day: allDay, tz: nn(b.tz), location: nn(b.location), description: nn(b.description),
     rrule: cal.kind === 'local' || cal.kind === 'google' ? nn(b.rrule) : null, who: JSON.stringify(Array.isArray(b.who) ? b.who.map(Number) : []), note_id: nn(b.note_id) };
 }
-route('POST', '/api/events', async ({ user, body, origin }) => {
-  const cal = writableCalendar(+body.calendar_id, user.id);
+async function createEvent(uid, body, origin) {
+  const cal = writableCalendar(+body.calendar_id, uid);
   const ev = eventInput(body, cal);
   const ext = await pushEvent(store, cal, ev).catch((e) => bad(`Could not save to ${cal.kind}: ${e.message}`));
   const { lastInsertRowid } = q(`INSERT INTO events(calendar_id, ext_id, title, start, end, all_day, tz, location, description, rrule, who, note_id, updated)
     VALUES (:cal, :ext, :title, :start, :end, :all_day, :tz, :location, :description, :rrule, :who, :note_id, :now)`).run({ cal: cal.id, ext: ext || `local-${token(9)}`, now: Date.now(), ...ev });
   broadcast('events', {}, origin);
-  return { id: Number(lastInsertRowid) };
-});
+  return { id: Number(lastInsertRowid), calendar: cal.name };
+}
+route('POST', '/api/events', ({ user, body, origin }) => createEvent(user.id, body, origin));
 route('PUT', '/api/events/:id', async ({ user, params, body, origin }) => {
   const cur = q('SELECT * FROM events WHERE id = ?').get(+params.id) || notFound();
   let cal = writableCalendar(cur.calendar_id, user.id);
@@ -648,6 +651,37 @@ route('GET', '/ics/:token', ({ params, req, res }) => {
   res.writeHead(200, { 'content-type': 'text/calendar; charset=utf-8', 'cache-control': 'no-cache', 'content-disposition': 'inline; filename="household.ics"' });
   res.end(body);
 }, { raw: true, public: true });
+
+// ---- Ask Claude (streams Server-Sent Events back on the POST response)
+const claudeBusy = new Set();
+route('POST', '/api/claude/chat', async ({ user, body, req, res }) => {
+  if (!assistant.configured()) bad('Claude is not set up. Add ANTHROPIC_API_KEY to the Nexus container settings.');
+  const history = (Array.isArray(body.messages) ? body.messages : []).slice(-30)
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string' && m.text.trim())
+    .map((m) => ({ role: m.role, text: m.text.slice(0, 40000) }));
+  while (history.length && history[0].role !== 'user') history.shift();
+  if (!history.length || history[history.length - 1].role !== 'user') bad('Send a question.');
+  if (claudeBusy.has(user.id)) throw new HttpError(429, 'Claude is still answering your previous question.');
+  claudeBusy.add(user.id);
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+  const emit = (ev) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(ev)}\n\n`); };
+  const t0 = Date.now();
+  try {
+    const usage = await assistant.runAssistant({
+      deps: { q, visible, saveNote, getNote, createEvent, eventsInRange, health, origin: null },
+      user, history, context: { noteId: body.noteId, tz: body.tz }, emit, signal: ctrl.signal,
+    });
+    console.log(`[claude] ${user.name}: ${usage.input} in (${usage.cacheRead} cached) / ${usage.output} out tokens, ${Date.now() - t0} ms`);
+    emit({ type: 'done', usage });
+  } catch (e) {
+    if (!ctrl.signal.aborted) { console.warn('[claude]', e.message); emit({ type: 'error', message: assistant.friendlyError(e) }); }
+  } finally {
+    claudeBusy.delete(user.id);
+    res.end();
+  }
+}, { stream: true });
 
 // ---- homelab
 route('GET', '/api/services', () => Object.fromEntries(health));
