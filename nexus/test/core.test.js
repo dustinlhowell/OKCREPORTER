@@ -71,3 +71,10 @@ test('ICS round trip with TZID, all-day, overrides and folding', () => {
   assert.equal(back[0].start, ev[0].start);
   assert.match(out, /DTSTART;TZID=America\/New_York:20261116T090000/);
 });
+
+test('appendUnder adds to the end of a section, or creates it', async () => {
+  const { appendUnder } = await import('../lib/tools.js');
+  const doc = '## Focus\n- a\n\n## Inbox\n- 09:00 first\n\n## Log\n- x\n';
+  assert.equal(appendUnder(doc, 'Inbox', '- 10:00 second'), '## Focus\n- a\n\n## Inbox\n- 09:00 first\n- 10:00 second\n\n## Log\n- x\n');
+  assert.equal(appendUnder('## Focus\n- a\n', 'Inbox', '- t'), '## Focus\n- a\n\n## Inbox\n- t\n');
+});

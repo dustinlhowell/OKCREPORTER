@@ -105,7 +105,12 @@ You need a domain on Cloudflare.
    - Hostname: `nexus.yourdomain.com`
    - Service: `http://<unraid-ip>:8090`
 4. Set **Public URL** on the Nexus container to `https://nexus.yourdomain.com` and click **Apply**.
-5. *(Optional, extra lock)* Put a **Cloudflare Access** policy (email login) in front of the hostname. Add a **Bypass** rule for the path `/ics/*` so Google and Outlook can still fetch your calendar feed.
+5. *(Optional, extra lock)* Put a **Cloudflare Access** policy (email login) in front of the hostname. Then add **Bypass** rules for the paths that other services call directly:
+   - `/ics/*`: Google and Outlook fetching your calendar feed
+   - `/mcp`, `/.well-known/*`, `/oauth/*`: the Claude app connector
+   - `/api/capture`: Siri / Shortcuts quick capture
+
+   These paths are still protected by Nexus's own tokens and sign-in.
 
 ### Option C: Nginx Proxy Manager or SWAG (if you already run one)
 
@@ -127,6 +132,14 @@ Then set **Public URL** to the https address. Nexus reads `X-Forwarded-Proto` fr
 3. In Unraid, go to **Docker → Nexus → Edit**, paste the key into **Anthropic API key**, and click **Apply**.
 
 **✨ Ask Claude** then works in the sidebar and on every note. Each question's token usage shows up in the container's **Logs**. Model and effort are under **Show more settings**. The [app README](../README.md#ask-claude) covers what it can do, cost and privacy.
+
+## Capture from your phone (Claude app + Siri)
+
+Once Nexus is reachable over https (step 4), go to **Nexus → Settings → Phone & Claude app**:
+- **Claude app:** copy the connector URL. On claude.ai, go to **Settings → Connectors → Add custom connector**, paste the URL, click **Connect**, and click **Allow**. Then, from the Claude app on your phone, say *"save to Nexus: …"*.
+- **Siri:** click **Create capture token** and follow the Shortcut steps shown.
+
+The [app README](../README.md#capture-from-your-phone) has examples. If you use Cloudflare Access, add the bypass paths from step 5 of Option B.
 
 ## Google / Outlook two-way sync
 

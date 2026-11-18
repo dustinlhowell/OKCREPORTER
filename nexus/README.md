@@ -110,6 +110,40 @@ Claude acts as whoever is signed in. It sees only the notes that person can see,
 
 **How it works:** Nexus uses the official Anthropic SDK's tool runner on the Messages API. The conversation loop runs on your own server, and the chat history stays in your browser.
 
+## Capture from your phone
+
+There are two ways to get thoughts into Nexus without opening it. Either way, short thoughts land in **today's daily note under "Inbox"** with the time. Longer memos become their own note in the **Inbox** folder. Tasks with a date also appear on the calendar.
+
+### 1. Claude app connector (voice or text, with AI)
+Nexus is an MCP server, so you can add it as a **custom connector** in Claude:
+1. On claude.ai, go to **Settings → Connectors → Add custom connector**.
+2. Enter the URL `https://YOUR-HOST/mcp` (also shown in **Nexus → Settings → Phone & Claude app**).
+3. Click **Connect**, sign in to Nexus, and click **Allow**.
+
+The connector then shows up in the Claude app on your phone. Ask for things in plain language:
+
+- *"Save to Nexus: idea for the garage shelves…"*
+- *"Add tasks to replace the UPS battery Friday and call the vet."*
+- *"What did I write about the NAS layout?"*
+- *"Put the parent-teacher conference on our calendar Tuesday at 4."*
+
+You can talk to Claude using dictation (the mic on the keyboard) or voice mode.
+
+Claude can use the same tools as Ask Claude: capture, search and read notes, create and append to notes, and read or add calendar events. It acts as the person who connected it. Each household member connects their own Claude account, and you can disconnect it any time in Settings.
+
+> **Cloudflare Access users:** Anthropic's servers call the connector directly, so add a **Bypass** policy for these paths: `/mcp`, `/.well-known/*`, `/oauth/*` and `/api/capture`. They're still protected by Nexus's own sign-in and tokens.
+
+### 2. Siri / Shortcuts quick capture (no AI, instant)
+1. Go to **Settings → Phone & Claude app → Create capture token**.
+2. Build the 4-step iPhone Shortcut shown there: *Dictate Text → Get Contents of URL*, which sends a POST to `/api/capture` with `Authorization: Bearer <token>`.
+3. Run it by saying *"Hey Siri, Nexus note"*, or put it on your Action Button or Home Screen.
+
+Starting a note with "remind me to…", "todo…" or "task…" saves it as a task. Any tool that can send an HTTP request works too, for example Android HTTP shortcuts or scripts:
+
+```bash
+curl -X POST https://YOUR-HOST/api/capture -H "Authorization: Bearer nxp_…" -H "content-type: application/json" -d '{"text":"Look into a Tailscale exit node"}'
+```
+
 ## Shared calendar
 
 - **Month, Week and Agenda** views. You can filter each person and the shared *Household* calendar on or off.
@@ -232,4 +266,5 @@ public/            SPA: app.js (views), editor.js, md.js (renderer), calendar.js
 
 - **Live sync:** when one person edits a note, the other sees the change immediately over Server-Sent Events.
 - **Conflict handling:** if both of you edit the same note at once, the second save is rejected with a conflict banner rather than silently overwriting.
+- **Connector auth:** OAuth 2.1 with PKCE (S256 only) and dynamic client registration. Access tokens last 7 days, refresh tokens 180 days and rotate on every use. All tokens are stored as SHA-256 hashes, and consent requires a same-origin form post.
 - **Security:** passwords are hashed with scrypt; session cookies are HttpOnly and SameSite; state-changing requests are checked for same origin; login is rate-limited; Markdown output is escaped.
