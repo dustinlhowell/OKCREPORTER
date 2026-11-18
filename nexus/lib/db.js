@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, calendar_id INTEGER NO
 CREATE INDEX IF NOT EXISTS events_range ON events(start, end);
 CREATE INDEX IF NOT EXISTS events_rrule ON events(calendar_id) WHERE rrule IS NOT NULL;
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+
+-- Connected apps (OAuth clients registered by e.g. the Claude app) and access tokens (stored hashed).
+CREATE TABLE IF NOT EXISTS oauth_clients(client_id TEXT PRIMARY KEY, secret_hash TEXT, name TEXT NOT NULL, redirect_uris TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS api_tokens(id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, client_id TEXT, name TEXT, expires INTEGER, created INTEGER NOT NULL, last_used INTEGER);
+CREATE INDEX IF NOT EXISTS api_tokens_user ON api_tokens(user_id, kind);
 `;
 
 export function openDb(file) {

@@ -750,6 +750,17 @@ async function viewSettings(main, params) {
   </section>
   <section class="panel"><h3>Household feed</h3><p class="muted">Subscribe to this URL in Google Calendar (“From URL”), Outlook (“Subscribe from web”), or your iPhone (Settings → Calendar → Accounts → Add Subscribed Calendar) so everything shows on your phone. Your own Google/Outlook events are left out to avoid duplicates.</p>
     <div class="copyrow"><input readonly value="${esc(feed)}" id="feed"><button class="btn" id="copyFeed">Copy</button><a class="btn" href="${esc(feed.replace(/^https?:/, 'webcal:'))}">Open in calendar app</a><button class="btn" id="rotate" title="Invalidate the old link">New link</button></div></section>
+  <section class="panel" id="phone"><h3>Phone &amp; Claude app</h3>
+    <p><b>Claude app connector.</b> Add Nexus to your Claude app so you can say or type <i>"save this to Nexus: …"</i> or <i>"add a task to call the vet Friday"</i> from your phone. Thoughts land in today's note under <b>Inbox</b>; tasks with dates show up on the calendar.</p>
+    <ol class="small"><li>On <b>claude.ai</b> (web or desktop): <b>Settings → Connectors → Add custom connector</b>.</li>
+      <li>Name it <b>Nexus</b> and paste this URL:</li></ol>
+    <div class="copyrow"><input readonly value="${esc(state.publicUrl || location.origin)}/mcp" id="mcpUrl"><button class="btn" id="copyMcp">Copy</button></div>
+    <ol class="small" start="3"><li>Click <b>Connect</b>, sign in to Nexus and click <b>Allow</b>. The connector then works in the Claude app on your phone too.</li></ol>
+    <div id="apps" class="small muted">Loading…</div>
+    <p style="margin-top:18px"><b>Siri / Shortcuts quick capture</b> (no AI): dictate a thought and it goes straight into today's Inbox. Starting with "remind me to…" or "todo…" makes it a task.</p>
+    <div class="row wrap"><button class="btn" id="newPat">Create capture token</button></div>
+    <div id="pats" class="small"></div>
+  </section>
   <section class="panel"><h3>Household members</h3>${state.users.map((u) => `<div class="calrow"><span class="avatar" style="background:${u.color}">${esc(u.name[0])}</span><b>${esc(u.name)}</b>${u.id === me.id ? '<span class="muted">(you)</span>' : ''}</div>`).join('')}
     <form id="addUser" class="row wrap"><input name="name" placeholder="Name" required><input name="email" type="email" placeholder="Email" required><input name="password" type="password" placeholder="Temporary password (8+)" minlength="8" required><button class="btn primary">Add member</button></form></section>
   <section class="panel"><h3>Your profile</h3><form id="profile" class="row wrap"><input name="name" value="${esc(me.name)}"><input name="color" type="color" value="${esc(me.color)}"><button class="btn">Save</button></form>
@@ -795,6 +806,31 @@ async function viewSettings(main, params) {
       toast(`Imported ${total} notes`, 'ok'); await loadNotes(); await loadMeta(); renderSidebar();
     }
   };
+  const drawTokens = async () => {
+    const t = await api('GET', '/api/tokens');
+    $('#apps').innerHTML = t.apps.length ? '<b>Connected apps</b>' + t.apps.map((a) => `<div class="calrow"><span>🔗</span><div class="cinfo"><b>${esc(a.name || 'App')}</b><span class="muted">connected ${ago(a.created)}${a.last_used ? ` · last used ${ago(a.last_used)}` : ''}</span></div><button class="btn sm danger" data-app="${esc(a.client_id)}">Disconnect</button></div>`).join('') : 'No apps connected yet.';
+    $('#pats').innerHTML = t.tokens.map((k) => `<div class="calrow"><span>🔑</span><div class="cinfo"><b>${esc(k.name)}</b><span class="muted">created ${ago(k.created)}${k.last_used ? ` · last used ${ago(k.last_used)}` : ' · never used'}</span></div><button class="btn sm danger" data-pat="${k.id}">Revoke</button></div>`).join('');
+  };
+  drawTokens().catch(() => {});
+  $('#phone').addEventListener('click', async (e) => {
+    if (e.target.id === 'copyMcp') { navigator.clipboard?.writeText($('#mcpUrl').value); toast('Connector URL copied'); }
+    if (e.target.dataset.app && confirm('Disconnect this app? It will need to sign in again.')) { await api('DELETE', `/api/apps/${encodeURIComponent(e.target.dataset.app)}`); drawTokens(); }
+    if (e.target.dataset.pat && confirm('Revoke this token? Shortcuts using it will stop working.')) { await api('DELETE', `/api/tokens/${e.target.dataset.pat}`); drawTokens(); }
+    if (e.target.id === 'newPat') {
+      const name = prompt('Name this token (e.g. "Dustin iPhone")', `${me.name}'s phone`); if (!name) return;
+      const { token: tk } = await api('POST', '/api/tokens', { name });
+      drawTokens();
+      modal('Capture token created', `<p>Copy it now – it won't be shown again.</p><div class="copyrow"><input readonly value="${esc(tk)}" id="patVal"><button class="btn" id="copyPat">Copy</button></div>
+        <h4>iPhone Shortcut (2 minutes)</h4><ol class="small">
+        <li>Open <b>Shortcuts</b> → <b>＋</b> → name it <b>Nexus note</b>.</li>
+        <li>Add action <b>Dictate Text</b> (or <b>Ask for Input</b> to type).</li>
+        <li>Add action <b>Get Contents of URL</b>: URL <code>${esc(state.publicUrl || location.origin)}/api/capture</code>, Method <b>POST</b>, Headers: <code>Authorization</code> = <code>Bearer</code> + space + your token. Request Body <b>JSON</b>: key <code>text</code> = <i>Dictated Text</i>.</li>
+        <li>Optional: add <b>Show Notification</b> with the result. Then say <b>"Hey Siri, Nexus note"</b>, or add it to your Home Screen / Action Button.</li></ol>
+        <p class="small muted">Android: any "HTTP request" shortcut app works the same way (POST JSON <code>{"text": "…"}</code> with that header).</p>`, (box) => {
+        box.querySelector('#copyPat').onclick = () => { navigator.clipboard?.writeText(tk); toast('Token copied'); };
+      });
+    }
+  });
   $('#addUser').onsubmit = async (e) => { e.preventDefault(); try { await api('POST', '/api/users', Object.fromEntries(new FormData(e.target))); toast('Member added – they can sign in now', 'ok'); await boot(true); route(); } catch (err) { toast(err.message, 'error'); } };
   $('#profile').onsubmit = async (e) => { e.preventDefault(); const u = await api('PATCH', '/api/users/me', Object.fromEntries(new FormData(e.target))); state.me = { ...state.me, ...u }; await boot(true); toast('Saved', 'ok'); route(); };
   $('#pw').onsubmit = async (e) => { e.preventDefault(); try { await api('PATCH', '/api/users/me', Object.fromEntries(new FormData(e.target))); toast('Password changed', 'ok'); e.target.reset(); } catch (err) { toast(err.message, 'error'); } };
@@ -887,7 +923,7 @@ document.addEventListener('keydown', (e) => {
 // ------------------------------------------------------------------ boot
 async function boot(refreshOnly = false) {
   const me = await api('GET', '/api/me');
-  state.me = me.user; state.users = me.users; state.integrations = me.integrations; state.claude = me.claude;
+  state.me = me.user; state.users = me.users; state.integrations = me.integrations; state.claude = me.claude; state.publicUrl = me.publicUrl;
   if (refreshOnly) { renderSidebar(); return; }
   shell(); applyTheme();
   await Promise.all([loadNotes(), loadMeta()]);

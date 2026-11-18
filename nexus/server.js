@@ -14,6 +14,8 @@ import { PROVIDERS, providerConfigured, authorizeUrl, exchangeCode, syncCalendar
 import { SUPERTAGS, NOTES } from './lib/seed.js';
 import { DAY } from './lib/time.js';
 import * as assistant from './lib/assistant.js';
+import { buildTools } from './lib/tools.js';
+import { z } from 'zod';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PORT = +(process.env.PORT || 8080);
@@ -96,7 +98,11 @@ function readBody(req, limit = 50 * 1024 * 1024) {
     req.on('data', (c) => { size += c.length; if (size > limit) { reject(new HttpError(413, 'Body too large')); req.destroy(); } else chunks.push(c); });
     req.on('end', () => {
       if (!size) return resolve({});
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { reject(new HttpError(400, 'Invalid JSON')); }
+      const raw = Buffer.concat(chunks).toString();
+      const ct = String(req.headers['content-type'] || '');
+      if (ct.includes('application/x-www-form-urlencoded')) return resolve(Object.fromEntries(new URLSearchParams(raw)));
+      if (ct.startsWith('text/plain')) return resolve({ text: raw });
+      try { resolve(JSON.parse(raw)); } catch { reject(new HttpError(400, 'Invalid JSON')); }
     });
     req.on('error', reject);
   });
@@ -332,6 +338,7 @@ route('POST', '/api/logout', ({ req, res }) => {
 
 route('GET', '/api/me', ({ user }) => ({
   claude: { configured: assistant.configured(), model: assistant.MODEL },
+  publicUrl: PUBLIC_URL || null,
   user, users: q(`SELECT id, name, color FROM users ORDER BY id`).all(),
   integrations: Object.fromEntries(Object.entries(PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: providerConfigured(k) }])),
 }));
@@ -397,14 +404,14 @@ route('POST', '/api/folders/rename', ({ user, body, origin }) => {
   return { ok: true };
 });
 
-route('GET', '/api/daily/:date', ({ user, params, origin }) => {
-  const d = params.date;
+function ensureDaily(uid, d, origin) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) bad('Bad date');
   const ex = q('SELECT id FROM notes WHERE lower(title) = ?').get(d);
   if (ex) return { id: ex.id };
   const tpl = q("SELECT v FROM kv WHERE k = 'daily_template'").get()?.v ?? '## Focus\n- [ ] \n\n## Log\n- \n';
-  return saveNote(user.id, { title: d, folder: 'Daily', icon: '📅', content: tpl }, origin);
-});
+  return saveNote(uid, { title: d, folder: 'Daily', icon: '📅', content: tpl }, origin);
+}
+route('GET', '/api/daily/:date', ({ user, params, origin }) => ensureDaily(user.id, params.date, origin));
 
 route('GET', '/api/search', ({ user, query }) => {
   const raw = String(query.q || '').trim();
@@ -654,6 +661,7 @@ route('GET', '/ics/:token', ({ params, req, res }) => {
 
 // ---- Ask Claude (streams Server-Sent Events back on the POST response)
 const claudeBusy = new Set();
+const toolDeps = { q, visible, saveNote, getNote, createEvent, eventsInRange, health, ensureDaily, origin: null };
 route('POST', '/api/claude/chat', async ({ user, body, req, res }) => {
   if (!assistant.configured()) bad('Claude is not set up. Add ANTHROPIC_API_KEY to the Nexus container settings.');
   const history = (Array.isArray(body.messages) ? body.messages : []).slice(-30)
@@ -670,7 +678,7 @@ route('POST', '/api/claude/chat', async ({ user, body, req, res }) => {
   const t0 = Date.now();
   try {
     const usage = await assistant.runAssistant({
-      deps: { q, visible, saveNote, getNote, createEvent, eventsInRange, health, origin: null },
+      deps: toolDeps,
       user, history, context: { noteId: body.noteId, tz: body.tz }, emit, signal: ctrl.signal,
     });
     console.log(`[claude] ${user.name}: ${usage.input} in (${usage.cacheRead} cached) / ${usage.output} out tokens, ${Date.now() - t0} ms`);
@@ -682,6 +690,220 @@ route('POST', '/api/claude/chat', async ({ user, body, req, res }) => {
     res.end();
   }
 }, { stream: true });
+
+// ---- Connector for Claude apps (MCP over HTTP, OAuth 2.1 with PKCE) and token-based quick capture
+const sha = (v) => createHash('sha256').update(String(v)).digest('hex');
+const ACCESS_TTL = 7 * DAY, REFRESH_TTL = 180 * DAY;
+const authCodes = new Map(), authRequests = new Map();
+const SERVER_TZ = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+const MCP_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
+const MCP_INSTRUCTIONS = `Nexus is the user's household "second brain": notes (certification study, work knowledge base, homelab docs, daily notes) and the shared household calendar.
+Use the capture tool whenever the user wants to remember, save, jot down or note something, shares a voice memo or idea, or mentions something they need to do – put action items in its tasks with due dates (YYYY-MM-DD) when a day was mentioned. Confirm briefly what was saved.
+Search or read notes before answering questions about what the user has written. Times are in the household's time zone (${SERVER_TZ}).
+Note links look like [[Note Title]]; tasks are "- [ ] text @YYYY-MM-DD"; properties are "key:: value".`;
+
+function tokenUser(req, kinds) {
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  if (!m) return null;
+  const row = q(`SELECT t.id, t.kind, t.client_id, t.expires, u.id AS uid, u.name, u.email, u.color FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.hash = ?`).get(sha(m[1].trim()));
+  if (!row || !kinds.includes(row.kind) || (row.expires && row.expires < Date.now())) return null;
+  q('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(Date.now(), row.id);
+  return { id: row.uid, name: row.name, email: row.email, color: row.color, client_id: row.client_id };
+}
+function issueTokens(uid, clientId) {
+  const access = 'nxa_' + token(32), refresh = 'nxr_' + token(32), now = Date.now();
+  q('INSERT INTO api_tokens(hash, user_id, kind, client_id, expires, created) VALUES (?, ?, ?, ?, ?, ?)').run(sha(access), uid, 'access', clientId, now + ACCESS_TTL, now);
+  q('INSERT INTO api_tokens(hash, user_id, kind, client_id, expires, created) VALUES (?, ?, ?, ?, ?, ?)').run(sha(refresh), uid, 'refresh', clientId, now + REFRESH_TTL, now);
+  q("DELETE FROM api_tokens WHERE kind IN ('access','refresh') AND expires < ?").run(now);
+  return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL / 1000, refresh_token: refresh, scope: 'nexus' };
+}
+const oauthError = (res, status, error, description) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify({ error, error_description: description })); };
+
+// Discovery (RFC 9728 protected resource metadata, RFC 8414 authorization server metadata)
+const resourceMeta = ({ req }) => ({ resource: `${baseUrl(req)}/mcp`, authorization_servers: [baseUrl(req)], bearer_methods_supported: ['header'], scopes_supported: ['nexus'], resource_name: 'Nexus' });
+route('GET', '/.well-known/oauth-protected-resource', resourceMeta, { public: true });
+route('GET', '/.well-known/oauth-protected-resource/mcp', resourceMeta, { public: true });
+const asMeta = ({ req }) => {
+  const b = baseUrl(req);
+  return { issuer: b, authorization_endpoint: `${b}/oauth/authorize`, token_endpoint: `${b}/oauth/token`, registration_endpoint: `${b}/oauth/register`,
+    response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'], scopes_supported: ['nexus'] };
+};
+route('GET', '/.well-known/oauth-authorization-server', asMeta, { public: true });
+route('GET', '/.well-known/oauth-authorization-server/mcp', asMeta, { public: true });
+
+// Dynamic client registration (RFC 7591) – how the Claude app introduces itself.
+route('POST', '/oauth/register', ({ body, res }) => {
+  const uris = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String) : [];
+  const okUri = (u) => { try { const x = new URL(u); return x.protocol === 'https:' || (x.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(x.hostname)); } catch { return false; } };
+  if (!uris.length || !uris.every(okUri)) return oauthError(res, 400, 'invalid_redirect_uri', 'redirect_uris must be https URLs');
+  if (q('SELECT COUNT(*) c FROM oauth_clients').get().c >= 500) return oauthError(res, 400, 'invalid_client_metadata', 'Too many registered clients');
+  const method = ['client_secret_post', 'client_secret_basic'].includes(body.token_endpoint_auth_method) ? body.token_endpoint_auth_method : 'none';
+  const clientId = 'nxc_' + token(16), secret = method === 'none' ? null : 'nxs_' + token(32);
+  const name = String(body.client_name || 'App').slice(0, 100);
+  q('INSERT INTO oauth_clients(client_id, secret_hash, name, redirect_uris, created) VALUES (?, ?, ?, ?, ?)').run(clientId, secret ? sha(secret) : null, name, JSON.stringify(uris), Date.now());
+  res.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify({ client_id: clientId, ...(secret ? { client_secret: secret, client_secret_expires_at: 0 } : {}), client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_name: name, redirect_uris: uris, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: method }));
+}, { public: true, raw: true });
+
+function authPage(res, { title, body, status = 200 }) {
+  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https: http://localhost:* http://127.0.0.1:*" });
+  res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Nexus</title>
+<style>:root{color-scheme:light dark;--bg:#fbfbfa;--fg:#1f2328;--mute:#6b7280;--line:#e5e5e2;--acc:#7c3aed;--panel:#fff}@media(prefers-color-scheme:dark){:root{--bg:#111318;--fg:#e6e6e6;--mute:#9097a3;--line:#2a2e37;--acc:#a78bfa;--panel:#1b1e25}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+main{width:100%;max-width:400px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px}h1{font-size:21px;margin:0 0 8px}.logo{color:var(--acc);font-size:32px}
+p{color:var(--mute);margin:8px 0}ul{color:var(--mute);padding-left:20px;margin:8px 0 16px}input{width:100%;box-sizing:border-box;padding:10px 12px;margin:5px 0;border:1px solid var(--line);border-radius:9px;background:transparent;color:inherit;font:inherit}
+.row{display:flex;gap:10px;margin-top:16px}button{flex:1;padding:11px;border-radius:9px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;cursor:pointer}button.go{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}.err{color:#dc2626}</style></head>
+<body><main><div class="logo">◆</div>${body}</main></body></html>`);
+}
+const escH = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function sessionUser(req) {
+  const sid = cookies(req).sid;
+  return sid ? q('SELECT u.id, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires > ?').get(sid, Date.now()) : null;
+}
+function consentForm(res, reqId, client, user, error) {
+  authPage(res, { title: 'Connect', body: `<h1>Connect ${escH(client.name)} to Nexus</h1>
+    <p><b>${escH(client.name)}</b> is asking to use Nexus as ${user ? `<b>${escH(user.name)}</b>` : 'you'}. It will be able to:</p>
+    <ul><li>save notes, voice memos and tasks</li><li>search and read your notes</li><li>read and add calendar events</li></ul>
+    <form method="post" action="/oauth/authorize"><input type="hidden" name="req" value="${escH(reqId)}">
+    ${user ? '' : '<input name="email" type="email" placeholder="Email" autocomplete="username" required><input name="password" type="password" placeholder="Password" autocomplete="current-password" required>'}
+    ${error ? `<p class="err">${escH(error)}</p>` : ''}
+    <div class="row"><button name="action" value="deny" formnovalidate>Cancel</button><button class="go" name="action" value="allow">Allow</button></div></form>
+    <p style="font-size:13px">You can disconnect it any time in Nexus → Settings → Phone &amp; Claude app.</p>` });
+}
+route('GET', '/oauth/authorize', ({ req, res, query }) => {
+  const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(String(query.client_id || ''));
+  const uris = client ? JSON.parse(client.redirect_uris) : [];
+  if (!client || !uris.includes(query.redirect_uri)) return authPage(res, { status: 400, title: 'Error', body: '<h1>Can’t connect</h1><p>This app isn’t registered with Nexus, or its return address doesn’t match. Remove the connector and add it again.</p>' });
+  const back = (params) => { const u = new URL(query.redirect_uri); for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v); if (query.state) u.searchParams.set('state', query.state); res.writeHead(302, { location: u.toString() }); res.end(); };
+  if (query.response_type !== 'code') return back({ error: 'unsupported_response_type' });
+  if (!query.code_challenge || query.code_challenge_method !== 'S256') return back({ error: 'invalid_request', error_description: 'PKCE with S256 is required' });
+  const reqId = token(18);
+  authRequests.set(reqId, { client_id: client.client_id, redirect_uri: query.redirect_uri, state: query.state || '', challenge: query.code_challenge, exp: Date.now() + 15 * 60000 });
+  consentForm(res, reqId, client, sessionUser(req));
+}, { public: true, raw: true });
+route('POST', '/oauth/authorize', ({ req, res, body }) => {
+  // Same-origin form posts only (blocks another site from submitting a consent on your behalf).
+  const origin = req.headers.origin;
+  if (origin && new URL(origin).host !== (req.headers['x-forwarded-host'] || req.headers.host)) return authPage(res, { status: 403, title: 'Error', body: '<h1>Blocked</h1><p>Cross-site request.</p>' });
+  const ar = authRequests.get(String(body.req || ''));
+  if (!ar || ar.exp < Date.now()) return authPage(res, { status: 400, title: 'Expired', body: '<h1>This sign-in expired</h1><p>Go back to the Claude app and try connecting again.</p>' });
+  const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(ar.client_id);
+  const back = (params) => { authRequests.delete(String(body.req)); const u = new URL(ar.redirect_uri); for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v); if (ar.state) u.searchParams.set('state', ar.state); res.writeHead(302, { location: u.toString() }); res.end(); };
+  if (body.action !== 'allow') return back({ error: 'access_denied' });
+  let user = sessionUser(req);
+  if (!user) {
+    const ip = String(req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress);
+    const a = loginAttempts.get(ip) || { n: 0, until: 0 };
+    if (a.until > Date.now()) return consentForm(res, body.req, client, null, 'Too many attempts – wait a minute.');
+    const u = q('SELECT * FROM users WHERE email = ?').get(String(body.email || '').trim());
+    if (!u || !checkPw(String(body.password || ''), u.pw)) { a.n++; if (a.n >= 5) { a.until = Date.now() + 60000; a.n = 0; } loginAttempts.set(ip, a); return consentForm(res, body.req, client, null, 'Wrong email or password.'); }
+    loginAttempts.delete(ip);
+    user = u;
+  }
+  const code = token(24);
+  authCodes.set(code, { client_id: ar.client_id, redirect_uri: ar.redirect_uri, challenge: ar.challenge, uid: user.id, exp: Date.now() + 5 * 60000 });
+  back({ code });
+}, { public: true, raw: true });
+
+route('POST', '/oauth/token', ({ req, res, body }) => {
+  let clientId = body.client_id, secret = body.client_secret;
+  const basic = /^Basic\s+(.+)$/i.exec(req.headers.authorization || '');
+  if (basic) { const [id, sec] = Buffer.from(basic[1], 'base64').toString().split(':').map(decodeURIComponent); clientId = id; secret = sec; }
+  const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(String(clientId || ''));
+  if (!client) return oauthError(res, 401, 'invalid_client', 'Unknown client');
+  if (client.secret_hash && sha(secret || '') !== client.secret_hash) return oauthError(res, 401, 'invalid_client', 'Bad client secret');
+  const ok = (data) => { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', pragma: 'no-cache' }); res.end(JSON.stringify(data)); };
+  if (body.grant_type === 'authorization_code') {
+    const c = authCodes.get(String(body.code || ''));
+    authCodes.delete(String(body.code || ''));
+    if (!c || c.exp < Date.now() || c.client_id !== client.client_id) return oauthError(res, 400, 'invalid_grant', 'Code is invalid or expired');
+    if (body.redirect_uri && body.redirect_uri !== c.redirect_uri) return oauthError(res, 400, 'invalid_grant', 'redirect_uri mismatch');
+    const verifier = String(body.code_verifier || '');
+    if (createHash('sha256').update(verifier).digest('base64url') !== c.challenge) return oauthError(res, 400, 'invalid_grant', 'PKCE verification failed');
+    return ok(issueTokens(c.uid, client.client_id));
+  }
+  if (body.grant_type === 'refresh_token') {
+    const row = q("SELECT * FROM api_tokens WHERE hash = ? AND kind = 'refresh'").get(sha(body.refresh_token || ''));
+    if (!row || row.client_id !== client.client_id || row.expires < Date.now()) return oauthError(res, 400, 'invalid_grant', 'Refresh token is invalid or expired');
+    q('DELETE FROM api_tokens WHERE id = ?').run(row.id); // rotate
+    return ok(issueTokens(row.user_id, client.client_id));
+  }
+  return oauthError(res, 400, 'unsupported_grant_type', 'Use authorization_code or refresh_token');
+}, { public: true, raw: true });
+
+// MCP endpoint (Streamable HTTP transport, JSON responses, stateless).
+const mcpToolsFor = (user) => buildTools({ deps: toolDeps, user, tz: SERVER_TZ });
+function mcpSchema(t) { const sch = z.toJSONSchema(t.inputSchema); delete sch.$schema; return sch; }
+async function mcpHandle(msg, user) {
+  const { id, method, params = {} } = msg || {};
+  const reply = (result) => ({ jsonrpc: '2.0', id, result });
+  const fail = (code, message) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
+  if (!msg || msg.jsonrpc !== '2.0' || typeof method !== 'string') return fail(-32600, 'Invalid request');
+  if (id === undefined) return null; // notification (e.g. notifications/initialized)
+  switch (method) {
+    case 'initialize':
+      return reply({ protocolVersion: MCP_VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : MCP_VERSIONS[0],
+        capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'nexus', title: 'Nexus', version: '1.0.0' }, instructions: MCP_INSTRUCTIONS });
+    case 'ping': return reply({});
+    case 'tools/list':
+      return reply({ tools: mcpToolsFor(user).map((t) => ({ name: t.name, description: t.description, inputSchema: mcpSchema(t),
+        annotations: { readOnlyHint: !!t.readOnly, destructiveHint: false, idempotentHint: !!t.readOnly, openWorldHint: false } })) });
+    case 'tools/call': {
+      const t = mcpToolsFor(user).find((x) => x.name === params.name);
+      if (!t) return fail(-32602, `Unknown tool: ${params.name}`);
+      const parsed = t.inputSchema.safeParse(params.arguments ?? {});
+      if (!parsed.success) return reply({ content: [{ type: 'text', text: `Invalid arguments: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ')}` }], isError: true });
+      try { return reply({ content: [{ type: 'text', text: String(await t.run(parsed.data)) }] }); }
+      catch (e) { return reply({ content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true }); }
+    }
+    default: return fail(-32601, `Method not found: ${method}`);
+  }
+}
+route('POST', '/mcp', async ({ req, res, body }) => {
+  const user = tokenUser(req, ['access']);
+  if (!user) {
+    res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': `Bearer resource_metadata="${baseUrl(req)}/.well-known/oauth-protected-resource/mcp", scope="nexus"` });
+    return res.end(JSON.stringify({ error: 'invalid_token', error_description: 'Connect Nexus from your Claude app to get access.' }));
+  }
+  const batch = Array.isArray(body);
+  const out = (await Promise.all((batch ? body : [body]).map((m) => mcpHandle(m, user)))).filter(Boolean);
+  if (!out.length) { res.writeHead(202); return res.end(); }
+  const json = JSON.stringify(batch ? out : out[0]);
+  res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(json);
+}, { public: true, raw: true });
+const mcpNoStream = ({ res }) => { res.writeHead(405, { allow: 'POST' }); res.end(); };
+route('GET', '/mcp', mcpNoStream, { public: true, raw: true });
+route('DELETE', '/mcp', mcpNoStream, { public: true, raw: true });
+
+// Quick capture with a personal token (iPhone Shortcuts / Siri, Android HTTP shortcuts, scripts). No AI involved.
+route('POST', '/api/capture', async ({ req, body }) => {
+  const user = tokenUser(req, ['pat']);
+  if (!user) throw new HttpError(401, 'Missing or invalid capture token');
+  let text = String(body.text ?? body.note ?? '').trim();
+  if (!text) bad('Send some text');
+  const tasks = [];
+  const m = /^(?:todo|to do|task|remind me to)[:,]?\s+(.+)$/i.exec(text);
+  if (m) { tasks.push({ text: m[1].replace(/[.!]$/, '') }); text = ''; }
+  const capture = mcpToolsFor(user).find((t) => t.name === 'capture');
+  return { ok: true, message: await capture.run({ text, title: body.title ? String(body.title) : undefined, tasks }) };
+}, { public: true });
+
+// Personal tokens and connected apps (Settings → Phone & Claude app)
+route('GET', '/api/tokens', ({ user }) => ({
+  tokens: q("SELECT id, name, created, last_used FROM api_tokens WHERE user_id = ? AND kind = 'pat' ORDER BY created DESC").all(user.id),
+  apps: q(`SELECT t.client_id, c.name, MIN(t.created) AS created, MAX(t.last_used) AS last_used FROM api_tokens t LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+    WHERE t.user_id = ? AND t.kind IN ('access','refresh') AND t.expires > ? GROUP BY t.client_id ORDER BY created DESC`).all(user.id, Date.now()),
+}));
+route('POST', '/api/tokens', ({ user, body }) => {
+  const t = 'nxp_' + token(24);
+  q("INSERT INTO api_tokens(hash, user_id, kind, name, created) VALUES (?, ?, 'pat', ?, ?)").run(sha(t), user.id, String(body.name || 'Quick capture').slice(0, 60), Date.now());
+  return { token: t };
+});
+route('DELETE', '/api/tokens/:id', ({ user, params }) => { q("DELETE FROM api_tokens WHERE id = ? AND user_id = ? AND kind = 'pat'").run(+params.id, user.id); return { ok: true }; });
+route('DELETE', '/api/apps/:client', ({ user, params }) => { q("DELETE FROM api_tokens WHERE user_id = ? AND client_id = ? AND kind IN ('access','refresh')").run(user.id, decodeURIComponent(params.client)); return { ok: true }; });
 
 // ---- homelab
 route('GET', '/api/services', () => Object.fromEntries(health));
@@ -739,7 +961,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'same-origin');
   try {
-    if (!path.startsWith('/api/') && !path.startsWith('/ics/')) {
+    if (!path.startsWith('/api/') && !path.startsWith('/ics/') && !path.startsWith('/oauth/') && !path.startsWith('/.well-known/') && path !== '/mcp') {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       if (serveAsset(req, res, path === '/' ? '/index.html' : path, url.searchParams.has('v'))) return;
       if (!extname(path)) return void serveAsset(req, res, '/index.html');
