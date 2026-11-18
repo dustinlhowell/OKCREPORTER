@@ -50,6 +50,8 @@ All data lives in a single SQLite file, `data/nexus.db`.
 | `#tag` | A tag. It shows up under **Databases** in the sidebar. |
 | `status:: studying` | A property. It becomes a column in that tag's database. |
 | `- [ ] Renew TLS cert @2026-12-01 14:00` | A task that appears in **Tasks** and on the **calendar**. |
+| `- [ ] Change HVAC filter @2026-12-01 @every 3 months` | A **repeating task**. When you tick it, it's stamped ✅ with the date and the next one is added below with the new due date. Also accepts `@every week`, `@every 2 weeks`, `@every day`, `@every year`, or `🔁 every month`. |
+| Paste, drag or 📎 a file | An **attachment**. Images show inline, voice memos and videos get a player, and PDFs and other files become links. 🎙️ records a voice memo in the browser. |
 | `What is LRS? ?? Locally redundant storage` | A flashcard. |
 | `Q: …` on one line, then `A: …` on the next | Also a flashcard. |
 | `> [!tip] Title` | A callout. `warning`, `danger`, `info` and `question` also work. |
@@ -68,16 +70,51 @@ These supertags come preconfigured:
 | `#service` | Homelab services | url, host, port, stack, status, backup |
 | `#runbook` | Homelab procedures | service, last run |
 | `#meeting` | Meeting notes | date, attendees |
+| `#bill` | Household bills | amount, due day, autopay, account, paid by, status (each comes with a monthly repeating "pay" task) |
+| `#chore` | Chores | assignee, area, last done (each comes with a weekly repeating task) |
+
+There's also a shared **Groceries** checklist in the *Household* folder.
 
 You can add your own with **＋** next to *Databases*. Editing a cell in a table, or dragging a card on a board, rewrites the `key:: value` line in the note. That keeps the Markdown file as the single source of truth.
 
 ### Homelab monitoring
 
-Any note tagged `#service` that has a `url::` property is pinged every 2 minutes. The check accepts self-signed certificates. Status and latency appear on the Home page and in the service database.
+Any note tagged `#service` that has a `url::` property is pinged every 2 minutes. The check accepts self-signed certificates. Status and latency appear on the Home page and in the service database. A service only counts as **down** after two failed checks in a row, which is when the alert goes out (see Notifications).
+
+**Unraid:** set `UNRAID_URL` (your server's web UI address, e.g. `http://192.168.1.10`) and `UNRAID_API_KEY` to show Unraid on the Home page. You get:
+- **Status:** array state, free space, each disk's health and temperature ("zz" means spun down), and Docker containers.
+- **Ask Claude:** questions like *"is anything wrong with the server?"* are answered from this live data.
+- **Alerts:** you're notified about failing disks, hot disks (at or above `UNRAID_TEMP_WARN`, 50 °C by default), an array that isn't started, an array over 90% full, or a container that stops.
+
+To get the key: in Unraid, go to **Settings → Management Access → API Keys**, then create a key with read access. This needs Unraid 7, or 6.12 with the Unraid Connect plugin. If a piece can't be read on your Unraid version, the Home panel still shows the rest, and the error says which part failed.
 
 ### Flashcards
 
 **Review** uses an SM-2 style scheduler with four grades: Again, Hard, Good and Easy, on keys 1–4. You can study all due cards, or cram the cards in a single note. A card keeps its review schedule when you edit its answer.
+
+The Review page also shows your **study streak**, how many cards you reviewed this week, your recall rate over 30 days, and a chart of cards reviewed per day.
+
+### Version history & trash
+
+- **Version history:** every note keeps earlier versions; open one from the note's **⋯ → Version history**.
+  - A snapshot is saved when an editing session starts.
+  - A snapshot is always saved before Claude, the phone connector or a restore changes the note.
+  - You can preview any version and **Restore** it; the current version is kept too.
+  - Up to 100 versions are kept per note, for 180 days.
+- **Trash:** deleting a note moves it to the **Trash** (in the sidebar) for 30 days. You can restore it from there or delete it forever.
+
+### Weekly review
+
+Every Sunday at 18:00 Nexus writes a **Weekly review** note in the *Reviews* folder:
+- what each of you added or changed
+- the next 7 days for the household
+- tasks that are overdue or due soon
+- Work KB articles not reviewed in 6+ months
+- exam countdowns and study activity
+- homelab problems
+- a few suggested tasks
+
+With Ask Claude set up, Claude writes it; without it you get a plain version. Notes hidden from AI are never included. You can change when it runs with `WEEKLY_REVIEW_DAY` / `WEEKLY_REVIEW_TIME`, or turn it off with `WEEKLY_REVIEW=off`.
 
 ---
 
@@ -143,6 +180,22 @@ Starting a note with "remind me to…", "todo…" or "task…" saves it as a tas
 ```bash
 curl -X POST https://YOUR-HOST/api/capture -H "Authorization: Bearer nxp_…" -H "content-type: application/json" -d '{"text":"Look into a Tailscale exit node"}'
 ```
+
+## Notifications
+
+Each household member chooses how they want to be notified in **Settings → Notifications**:
+
+- **ntfy** (free push app): enter a topic address such as `https://ntfy.sh/a-hard-to-guess-name` and subscribe to that topic in the ntfy app. You can also use your own ntfy server, optionally with an access token.
+- **Pushover:** set `PUSHOVER_TOKEN` (your Pushover application token) on the server; each person then enters their user key.
+- **Email:** set `SMTP_HOST`, `SMTP_PORT` (465 or 587), `SMTP_USER`, `SMTP_PASS` and `SMTP_FROM`. This works with Gmail (an app password), iCloud, Fastmail, Outlook.com and others. Nexus refuses to send a password over an unencrypted connection.
+
+What you can get:
+- **☀️ Morning summary** at a time you choose: today's events for both of you, tasks due or overdue, flashcards due, upcoming exams, and anything down.
+- **⏰ Reminders** before events, sent only to the people involved, plus reminders for timed tasks.
+- **🔴 Homelab alerts** when a `#service` goes down or comes back, or Unraid reports a problem.
+- **🗓️ The weekly review**, and **⚠️ a warning** if an off-server backup fails.
+
+The household calendar feed now includes a 30-minute alert on each event, so phone calendars remind you too. Change it with `?alarm=10` on the feed URL, or turn it off with `?alarm=0`.
 
 ## Shared calendar
 
@@ -210,6 +263,16 @@ Microsoft registers every app inside an Entra "directory". Work and school accou
 
 The catches: Outlook only refreshes subscribed calendars every few hours, and neither side can edit the other's events.
 
+### Email → calendar (Outlook)
+
+You can file appointment emails (doctor, school, restaurant bookings, deliveries) into an Outlook folder, by hand or with an Outlook rule. Nexus has Claude read them every 10 minutes and adds the appointments to the **Household** calendar, with confirmation numbers in the details. It also adds a line to today's Inbox and marks each email as read.
+
+To set it up:
+1. In your Entra app's **API permissions**, add the Microsoft Graph delegated permission `Mail.ReadWrite`.
+2. In Nexus, go to **Settings → Calendars**, then on your Outlook calendar click **📧 Email → calendar → Grant email access** and pick the folder (e.g. `Nexus`).
+
+This needs Ask Claude. Email text is treated as data, never as instructions. The extraction step has no tools, so an email can't make Claude do anything.
+
 > Some employers block third-party apps on work Microsoft 365 accounts. If yours does, publish your work calendar as ICS and use **Subscribe to ICS URL**.
 
 ---
@@ -230,16 +293,44 @@ The catches: Outlook only refreshes subscribed calendars every few hours, and ne
 | `SYNC_MINUTES` | `10` | Interval for calendar pulls |
 | `HEALTH_SECONDS` | `120` | Interval for service health checks |
 | `BACKUP_KEEP` | `14` | Nightly snapshots kept in `DATA_DIR/backups`. `0` turns them off. |
+| `WEEKLY_REVIEW` / `WEEKLY_REVIEW_DAY` / `WEEKLY_REVIEW_TIME` | `on` / `0` (Sunday) / `18:00` | Weekly review schedule |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | — / `587` | Email notifications |
+| `PUSHOVER_TOKEN` | — | Pushover notifications (application token) |
+| `UNRAID_URL` / `UNRAID_API_KEY` | — | Unraid status on Home, alerts, and Claude's `server_status` tool |
+| `UNRAID_POLL_SECONDS` / `UNRAID_TEMP_WARN` | `300` / `50` | How often to check Unraid; disk temperature warning (°C) |
+| `BACKUP_S3_ENDPOINT` / `BACKUP_S3_BUCKET` / `BACKUP_S3_REGION` / `BACKUP_S3_KEY_ID` / `BACKUP_S3_SECRET` | — | Off-server backups to S3-compatible storage |
+| `BACKUP_PASSPHRASE` | — | Encrypts off-server backups. **Required** for cloud storage. Keep it somewhere safe; without it backups can't be restored. |
+| `BACKUP_COPY_DIR` / `BACKUP_REMOTE_KEEP` | — / `30` | Also copy backups to this folder (e.g. another disk); how many off-server copies to keep |
+| `MAX_UPLOAD_MB` | `100` | Largest attachment |
 | `COOKIE_SECURE` | auto | Cookies are marked `Secure` when a request arrives over HTTPS (directly or through a proxy's `X-Forwarded-Proto`). Set to `1` to force it. |
 
 ## Backup
 
-Everything is in `data/nexus.db` (with `-wal`/`-shm` files next to it while the server runs). Nexus also writes a consistent snapshot to `data/backups/` every night. To make one yourself:
+Everything lives in `data/`:
+- `nexus.db`, with `-wal`/`-shm` files next to it while the server runs
+- the `files/` folder of attachments
+- `backups/`, where Nexus writes a consistent database snapshot every night
+
+**Off-server copies (recommended):** if the server's disks fail, the local backups go with them. Set `BACKUP_PASSPHRASE` and either or both of these:
+- **S3-compatible storage**, via the `BACKUP_S3_*` variables. Backblaze B2 costs about $6/TB/month; Cloudflare R2, Wasabi, AWS and MinIO also work.
+  - **Backblaze B2 example:** endpoint `https://s3.us-west-004.backblazeb2.com`, region `us-west-004`, plus a bucket and an application key limited to that bucket.
+- **A folder** (`BACKUP_COPY_DIR`) on another disk or a share that syncs elsewhere.
+
+Each night Nexus uploads the database snapshot plus any new attachments, all **encrypted with AES-256-GCM**, so the storage provider can't read them. **Settings → Backups** shows the last result and has a **Back up now** button. If an off-server backup fails, you get a notification.
+
+**Restore:** download `nexus/db/nexus-YYYY-MM-DD.db.enc`, decrypt it with `node scripts/decrypt-backup.mjs nexus-2026-11-18.db.enc nexus.db` (it asks for the passphrase), stop Nexus, and put `nexus.db` in the data folder. Attachments decrypt the same way into `data/files/`.
+
+To make a snapshot yourself:
 
 ```bash
 sqlite3 data/nexus.db ".backup 'nexus-$(date +%F).db'"   # safe while running
 # or: Settings → Export everything (JSON), or download single notes as .md
 ```
+
+## Security
+
+- **Two-step sign-in:** turn it on in **Settings → Two-step sign-in**. You scan a QR code with any authenticator app; 8 one-time recovery codes are created in case you lose your phone. Both the sign-in page and the Claude-connector consent page ask for the code.
+- **AI privacy:** in **Settings → AI privacy**, list folders (e.g. `Work KB`) whose notes Claude must never read; you can also hide single notes from a note's ⋯ menu. Hidden notes are invisible to Ask Claude, the phone connector and the weekly review, including their tasks and backlinks.
 
 ## Phones
 

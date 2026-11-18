@@ -19,7 +19,12 @@ export function inline(text, ctx = {}) {
     const exists = ctx.exists ? ctx.exists(title) : true;
     return put(`<a class="wl${exists ? '' : ' missing'}" data-title="${esc(title)}"${h ? ` data-h="${esc(slug(h.slice(1)))}"` : ''}>${esc(a || title + (h || ''))}</a>`);
   });
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, a, u) => put(`<img alt="${esc(a)}" src="${esc(safeUrl(u))}" loading="lazy">`));
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, a, u) => {
+    const url = esc(safeUrl(u));
+    if (/\.(m4a|mp3|wav|ogg|oga|webm|aac|caf)(\?|$)/i.test(u)) return put(`<span class="media"><span class="mlabel">${esc(a || 'Audio')}</span><audio controls preload="metadata" src="${url}"></audio></span>`);
+    if (/\.(mp4|mov|m4v)(\?|$)/i.test(u)) return put(`<video controls preload="metadata" src="${url}"></video>`);
+    return put(`<img alt="${esc(a)}" src="${url}" loading="lazy">`);
+  });
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, t, u) => put(`<a href="${esc(safeUrl(u))}" target="_blank" rel="noopener">${inline(t, ctx)}</a>`));
   s = s.replace(/<(https?:\/\/[^>\s]+)>|(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?'"])/g, (m, a, pre, b) => {
     const u = a || b;
@@ -32,6 +37,7 @@ export function inline(text, ctx = {}) {
     .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>')
     .replace(/==(?=\S)([\s\S]*?\S)==/g, '<mark>$1</mark>')
     .replace(/(^|[\s(,])#([\p{L}\p{N}_][\p{L}\p{N}_\-/]*)/gu, (_, p, t) => `${p}<a class="tag" data-tag="${t.toLowerCase()}" style="${ctx.tagStyle ? ctx.tagStyle(t.toLowerCase()) : ''}">#${t}</a>`)
+    .replace(/(?:@|🔁\s?)every\s+(?:(\d+)\s+)?(day|week|month|year)s?\b/gi, (m, n, u) => `<span class="due rep">🔁 every ${n && n !== '1' ? n + ' ' + u + 's' : u}</span>`)
     .replace(/(?:@|📅\s?|due:\s?)(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/g, (m, d, t) => `<span class="due${d < ctx.today ? ' over' : d === ctx.today ? ' today' : ''}" data-date="${d}">📅 ${d}${t ? ' ' + t : ''}</span>`);
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[+i]);
 }

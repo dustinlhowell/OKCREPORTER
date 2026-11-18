@@ -78,3 +78,44 @@ test('appendUnder adds to the end of a section, or creates it', async () => {
   assert.equal(appendUnder(doc, 'Inbox', '- 10:00 second'), '## Focus\n- a\n\n## Inbox\n- 09:00 first\n- 10:00 second\n\n## Log\n- x\n');
   assert.equal(appendUnder('## Focus\n- a\n', 'Inbox', '- t'), '## Focus\n- a\n\n## Inbox\n- t\n');
 });
+
+test('TOTP matches the RFC 6238 test vector and blocks replays', async () => {
+  const { hotp, verifyTotp, base32Encode, newRecoveryCodes, useRecoveryCode } = await import('../lib/totp.js');
+  const secret = base32Encode(Buffer.from('12345678901234567890'));
+  assert.equal(secret, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+  assert.equal(hotp(secret, 1), '287082');            // T = 59s
+  assert.equal(hotp(secret, 37037036), '081804');     // T = 1111111109s
+  const step = verifyTotp(secret, '287082', 0, 59000);
+  assert.equal(step, 1);
+  assert.equal(verifyTotp(secret, '287082', step, 59000), null); // same code can't be used twice
+  const { codes, hashes } = newRecoveryCodes();
+  const left = useRecoveryCode(hashes, codes[3].toUpperCase());
+  assert.equal(left.length, 7);
+  assert.equal(useRecoveryCode(left, codes[3]), null);
+});
+
+test('S3 SigV4 matches the AWS documentation examples; backups encrypt/decrypt', async () => {
+  const { signV4, encrypt, decrypt } = await import('../lib/offsite.js');
+  const creds = { accessKeyId: 'AKIAIOSFODNN7EXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'us-east-1', date: new Date('2013-05-24T00:00:00Z') };
+  const get = signV4({ ...creds, method: 'GET', url: 'https://examplebucket.s3.amazonaws.com/test.txt', headers: { range: 'bytes=0-9' } });
+  assert.match(get.authorization, /Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41$/);
+  const list = signV4({ ...creds, method: 'GET', url: 'https://examplebucket.s3.amazonaws.com/?max-keys=2&prefix=J' });
+  assert.match(list.authorization, /Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7$/);
+  const secret = Buffer.from('household data');
+  const box = encrypt(secret, 'correct horse');
+  assert.ok(!box.includes(secret));
+  assert.equal(decrypt(box, 'correct horse').toString(), 'household data');
+  assert.throws(() => decrypt(box, 'wrong'));
+});
+
+test('recurring tasks roll forward when completed', async () => {
+  const { rollRecurring, parseNote } = await import('../lib/parse.js');
+  const c = '## Chores\n- [x] Change HVAC filter @2026-11-15 @every 3 months\n- [ ] Water plants @every week\n';
+  const out = rollRecurring(c, '2026-11-18');
+  assert.equal(out, '## Chores\n- [x] Change HVAC filter @2026-11-15 @every 3 months ✅ 2026-11-18\n- [ ] Change HVAC filter @2027-02-15 @every 3 months\n- [ ] Water plants @every week\n');
+  assert.equal(rollRecurring(out, '2026-11-18'), out); // already handled
+  assert.match(rollRecurring('- [x] Pay rent @2026-01-31 🔁 every month', '2026-01-31'), /- \[ \] Pay rent @2026-02-28 🔁 every month$/);
+  assert.match(rollRecurring('- [x] Backup check @every 2 weeks', '2026-11-18'), /- \[ \] Backup check @every 2 weeks @2026-12-02$/);
+  assert.match(rollRecurring('- [x] Old chore @2026-01-01 @every week', '2026-11-18'), /- \[ \] Old chore @2026-11-19 @every week$/); // skips missed weeks
+  assert.equal(parseNote('- [ ] Change filter @2027-02-15 @every 3 months').tasks[0].due, '2027-02-15');
+});

@@ -103,7 +103,7 @@ const pad = (n) => String(n).padStart(2, '0');
 const wallStamp = (v, tz) => { const w = wallParts(Date.parse(v), tz); return `${w.y}${pad(w.m)}${pad(w.d)}T${pad(w.h)}${pad(w.mi)}${pad(w.s)}`; };
 const icsDate = (v, allDay) => allDay ? v.replace(/-/g, '').slice(0, 8) : new Date(v).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
-export function generateICS(name, events) {
+export function generateICS(name, events, { alarmMinutes = 0 } = {}) {
   const now = icsDate(new Date().toISOString());
   const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Nexus//Household Calendar//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
     `X-WR-CALNAME:${escapeText(name)}`, 'X-PUBLISHED-TTL:PT15M', 'REFRESH-INTERVAL;VALUE=DURATION:PT15M'];
@@ -117,6 +117,7 @@ export function generateICS(name, events) {
     if (e.description) L.push(`DESCRIPTION:${escapeText(e.description)}`);
     if (e.rrule) L.push(`RRULE:${e.rrule.replace(/^RRULE:/i, '')}`);
     for (const x of e.exdates || []) L.push(e.all_day ? `EXDATE;VALUE=DATE:${icsDate(x, true)}` : e.rrule && e.tz && e.tz !== 'UTC' ? `EXDATE;TZID=${e.tz}:${wallStamp(x, e.tz)}` : `EXDATE:${icsDate(x)}`);
+    if (alarmMinutes > 0 && !e.all_day) L.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${escapeText(e.title)}`, `TRIGGER:-PT${alarmMinutes}M`, 'END:VALARM');
     L.push('END:VEVENT');
   }
   L.push('END:VCALENDAR');

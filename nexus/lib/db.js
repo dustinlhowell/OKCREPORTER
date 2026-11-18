@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS notes(
   icon TEXT, pinned INTEGER NOT NULL DEFAULT 0, private INTEGER NOT NULL DEFAULT 0,
   owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL, updated_by INTEGER,
   created INTEGER NOT NULL, updated INTEGER NOT NULL);
-CREATE UNIQUE INDEX IF NOT EXISTS notes_title ON notes(lower(title));
 CREATE INDEX IF NOT EXISTS notes_updated ON notes(updated DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(title, content, content='notes', content_rowid='id', tokenize='porter unicode61 remove_diacritics 2');
@@ -57,13 +56,43 @@ CREATE TABLE IF NOT EXISTS oauth_clients(client_id TEXT PRIMARY KEY, secret_hash
 CREATE TABLE IF NOT EXISTS api_tokens(id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL, client_id TEXT, name TEXT, expires INTEGER, created INTEGER NOT NULL, last_used INTEGER);
 CREATE INDEX IF NOT EXISTS api_tokens_user ON api_tokens(user_id, kind);
+
+-- Version history: snapshots of a note's previous state.
+CREATE TABLE IF NOT EXISTS note_revisions(id INTEGER PRIMARY KEY, note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  title TEXT NOT NULL, content TEXT NOT NULL, author_id INTEGER, reason TEXT, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS note_revisions_note ON note_revisions(note_id, created DESC);
+-- Uploaded files (images, PDFs, audio…), stored under DATA_DIR/files.
+CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY, note_id INTEGER REFERENCES notes(id) ON DELETE SET NULL, user_id INTEGER,
+  name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL, created INTEGER NOT NULL);
+-- Flashcard review log (study streaks / charts).
+CREATE TABLE IF NOT EXISTS card_reviews(id INTEGER PRIMARY KEY, card_id INTEGER, user_id INTEGER, grade INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS card_reviews_at ON card_reviews(user_id, at);
+-- De-duplication for notifications that must only fire once.
+CREATE TABLE IF NOT EXISTS notify_log(key TEXT PRIMARY KEY, at INTEGER NOT NULL);
 `;
+
+// In-place upgrades for databases created by earlier versions.
+function migrate(db) {
+  const cols = (t) => new Set(db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name));
+  const add = (t, col, def) => { if (!cols(t).has(col)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${col} ${def}`); };
+  add('notes', 'deleted', 'INTEGER');              // trash: time it was deleted
+  add('notes', 'noai', 'INTEGER NOT NULL DEFAULT 0'); // hidden from Claude
+  add('users', 'totp_secret', 'TEXT');
+  add('users', 'totp_last', 'INTEGER');
+  add('users', 'recovery', 'TEXT');
+  add('users', 'prefs', "TEXT NOT NULL DEFAULT '{}'"); // notification settings etc.
+  // Titles only need to be unique among notes that aren't in the trash.
+  db.exec(`DROP INDEX IF EXISTS notes_title;
+    CREATE UNIQUE INDEX IF NOT EXISTS notes_title_live ON notes(lower(title)) WHERE deleted IS NULL;
+    CREATE INDEX IF NOT EXISTS notes_deleted ON notes(deleted) WHERE deleted IS NOT NULL;`);
+}
 
 export function openDb(file) {
   const db = new DatabaseSync(file);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
            PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32000; PRAGMA mmap_size=268435456;`);
   db.exec(SCHEMA);
+  migrate(db);
   const cache = new Map();
   const q = (sql) => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };
   const tx = (fn) => {

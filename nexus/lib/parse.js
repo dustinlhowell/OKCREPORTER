@@ -39,7 +39,7 @@ export function parseNote(content) {
     const t = TASK.exec(line);
     if (t) {
       const due = DUE.exec(t[3]);
-      tasks.push({ line: i, text: t[3].replace(DUE, '').trim(), done: t[2] !== ' ', due: due ? due[1] : null, time: due && due[2] ? due[2].padStart(5, '0') : null });
+      tasks.push({ line: i, text: t[3].replace(DUE, '').replace(EVERY, '').replace(/✅\s*\d{4}-\d{2}-\d{2}/, '').replace(/\s{2,}/g, ' ').trim(), repeat: EVERY.test(t[3]), done: t[2] !== ' ', due: due ? due[1] : null, time: due && due[2] ? due[2].padStart(5, '0') : null });
     }
 
     const c = CARD_INLINE.exec(text);
@@ -79,4 +79,44 @@ export function setTask(content, lineNo, done) {
   const lines = String(content || '').split('\n');
   if (lines[lineNo] && TASK.test(lines[lineNo])) lines[lineNo] = lines[lineNo].replace(/\[([ xX])\]/, done ? '[x]' : '[ ]');
   return lines.join('\n');
+}
+
+// Recurring tasks: "- [ ] Change HVAC filter @2026-12-01 @every 3 months" (also "🔁 every week", "@every day").
+// When such a task is ticked, it is stamped "✅ <date>" and the next occurrence is added right below it.
+const EVERY = /(?:@|🔁\s?)every\s+(?:(\d+)\s+)?(day|week|month|year)s?\b/i;
+const addInterval = (ymd, n, unit) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (unit === 'day') dt.setUTCDate(dt.getUTCDate() + n);
+  else if (unit === 'week') dt.setUTCDate(dt.getUTCDate() + 7 * n);
+  else {
+    const months = unit === 'year' ? 12 * n : n;
+    const target = new Date(Date.UTC(y, m - 1 + months, 1));
+    const dim = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    target.setUTCDate(Math.min(d, dim)); // Jan 31 + 1 month → Feb 28/29
+    return target.toISOString().slice(0, 10);
+  }
+  return dt.toISOString().slice(0, 10);
+};
+export function rollRecurring(content, today) {
+  const lines = String(content || '').split('\n');
+  let changed = false, inCode = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (FENCE.test(lines[i].trim())) { inCode = !inCode; continue; }
+    if (inCode) continue;
+    const t = TASK.exec(lines[i]);
+    if (!t || t[2] === ' ' || lines[i].includes('✅')) continue;
+    const ev = EVERY.exec(t[3]);
+    if (!ev) continue;
+    const n = Math.max(1, parseInt(ev[1] || '1', 10)), unit = ev[2].toLowerCase();
+    const due = DUE.exec(t[3]);
+    let next = addInterval(due ? due[1] : today, n, unit);
+    for (let guard = 0; next <= today && guard < 1000; guard++) next = addInterval(next, n, unit); // skip missed periods
+    const nextText = due ? t[3].replace(due[1], next) : `${t[3]} @${next}`;
+    lines[i] = `${lines[i]} ✅ ${today}`;
+    lines.splice(i + 1, 0, `${t[1]}- [ ] ${nextText}`);
+    changed = true;
+    i++;
+  }
+  return changed ? lines.join('\n') : content;
 }

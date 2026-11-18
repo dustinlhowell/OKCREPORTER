@@ -23,9 +23,11 @@ export const PROVIDERS = {
 
 export const providerConfigured = (p) => { const e = PROVIDERS[p]?.env(); return !!(e && e.id && e.secret); };
 
-export function authorizeUrl(provider, redirectUri, state) {
+export const MAIL_SCOPE = 'Mail.ReadWrite';
+export function authorizeUrl(provider, redirectUri, state, { mail = false } = {}) {
   const p = PROVIDERS[provider], { id } = p.env();
-  const params = new URLSearchParams({ client_id: id, redirect_uri: redirectUri, response_type: 'code', scope: p.scope, state, ...p.extraAuth });
+  const scope = mail && provider === 'outlook' ? `${p.scope} ${MAIL_SCOPE}` : p.scope;
+  const params = new URLSearchParams({ client_id: id, redirect_uri: redirectUri, response_type: 'code', scope, state, ...p.extraAuth });
   return `${p.authUrl}?${params}`;
 }
 
@@ -68,7 +70,7 @@ async function api(cfg, provider, url, opts = {}) {
   const token = await accessToken(cfg, provider);
   const res = await fetch(url, {
     ...opts,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', Prefer: 'outlook.timezone="UTC"', ...(opts.headers || {}) },
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', Prefer: opts.prefer || 'outlook.timezone="UTC"', ...(opts.headers || {}) },
   });
   if (res.status === 204 || res.status === 410 && opts.method === 'DELETE') return null;
   const j = await res.json().catch(() => ({}));
@@ -227,4 +229,28 @@ export async function deleteRemote(store, cal, extId) {
       await api(cfg, 'outlook', `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(extId)}`, { method: 'DELETE' });
     }
   } finally { saveCfg(store, cal, cfg); }
+}
+
+const GRAPH = process.env.MS_GRAPH_URL || 'https://graph.microsoft.com'; // overridable for tests
+// ---- Outlook mail (for "email → calendar"): needs the Mail.ReadWrite permission granted via "Grant email access".
+export async function outlookMail(store, cal, { folder, top = 10 }) {
+  const cfg = JSON.parse(cal.config || '{}');
+  try {
+    let fid = cfg.mailFolderId && cfg.mailFolderName === folder ? cfg.mailFolderId : null;
+    if (!fid) {
+      const f = encodeURIComponent(folder.replace(/'/g, "''"));
+      const found = (await api(cfg, 'outlook', `${GRAPH}/v1.0/me/mailFolders?$filter=displayName eq '${f}'&$select=id`)).value?.[0]
+        || (await api(cfg, 'outlook', `${GRAPH}/v1.0/me/mailFolders/inbox/childFolders?$filter=displayName eq '${f}'&$select=id`)).value?.[0];
+      if (!found) throw new Error(`No folder named "${folder}" in this Outlook mailbox – create it (top level or under Inbox).`);
+      fid = cfg.mailFolderId = found.id; cfg.mailFolderName = folder; cfg._dirty = true;
+    }
+    const j = await api(cfg, 'outlook', `${GRAPH}/v1.0/me/mailFolders/${fid}/messages?$filter=isRead eq false&$top=${top}&$orderby=receivedDateTime asc&$select=id,subject,from,receivedDateTime,body`,
+      { prefer: 'outlook.timezone="UTC", outlook.body-content-type="text"' });
+    return (j.value || []).map((m) => ({ id: m.id, subject: m.subject || '(no subject)', from: m.from?.emailAddress?.address || '', received: m.receivedDateTime, text: String(m.body?.content || '').replace(/\n{3,}/g, '\n\n').slice(0, 20000) }));
+  } finally { saveCfg(store, cal, cfg); }
+}
+export async function outlookMarkRead(store, cal, id) {
+  const cfg = JSON.parse(cal.config || '{}');
+  try { await api(cfg, 'outlook', `${GRAPH}/v1.0/me/messages/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ isRead: true }) }); }
+  finally { saveCfg(store, cal, cfg); }
 }

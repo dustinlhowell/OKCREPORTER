@@ -21,6 +21,7 @@ export function appendUnder(content, heading, text) {
 
 export function buildTools({ deps, user, tz }) {
   const { q, visible, saveNote, getNote, createEvent, eventsInRange, health, ensureDaily, origin } = deps;
+  const aiHidden = deps.aiHidden || (() => false);
   const uid = user.id;
   const users = q('SELECT id, name FROM users ORDER BY id').all();
   const userIds = (names = []) => names.map((nm) => users.find((u) => u.name.toLowerCase() === String(nm).toLowerCase())?.id).filter(Boolean);
@@ -83,7 +84,7 @@ export function buildTools({ deps, user, tz }) {
         saved = `Saved to the Inbox in today's note [[${today}]]`;
       }
       const cur = getNote(daily.id, uid);
-      saveNote(uid, { id: daily.id, content: appendUnder(cur.content, 'Inbox', dailyText) }, origin);
+      saveNote(uid, { id: daily.id, content: appendUnder(cur.content, 'Inbox', dailyText), revReason: 'Before a capture' }, origin);
       const dated = taskLines.filter((l) => / @\d{4}-/.test(l)).length;
       return `${saved}${taskLines.length ? `, with ${taskLines.length} task${taskLines.length > 1 ? 's' : ''}${dated ? ` (${dated} on the calendar)` : ''}` : ''}.`;
     }, ({ title, tasks }) => (title ? `Captured “${title}”` : tasks?.length ? `Captured ${tasks.length} task${tasks.length > 1 ? 's' : ''}` : 'Captured to inbox')),
@@ -116,9 +117,33 @@ export function buildTools({ deps, user, tz }) {
       const id = findNote(title);
       if (!id) return `No note titled "${title}". Try search_notes.`;
       const n = getNote(id, uid);
-      return `# ${n.title}\nfolder: ${n.folder || '(root)'} · updated ${new Date(n.updated).toISOString().slice(0, 10)}${n.updated_by_name ? ` by ${n.updated_by_name}` : ''}\n`
-        + `linked from: ${n.backlinks.map((b) => `[[${b.title}]]`).join(', ') || 'none'}\n\n${trunc(n.content, 60000)}`;
+      const files = q('SELECT id, name, mime, size FROM attachments WHERE note_id = ? ORDER BY created').all(id);
+      const fileList = files.length ? `\nattachments (use read_attachment): ${files.map((f) => `${f.name} [id ${f.id}, ${f.mime}, ${Math.ceil(f.size / 1024)} KB]`).join('; ')}` : '';
+      return `# ${n.title}${fileList}\nfolder: ${n.folder || '(root)'} · updated ${new Date(n.updated).toISOString().slice(0, 10)}${n.updated_by_name ? ` by ${n.updated_by_name}` : ''}\n`
+        + `linked from: ${n.backlinks.filter((b) => !aiHidden(b.id)).map((b) => `[[${b.title}]]`).join(', ') || 'none'}\n\n${trunc(n.content, 60000)}`;
     }, ({ title }) => `Read “${title}”`),
+
+    tool({
+      name: 'read_attachment',
+      readOnly: true,
+      description: 'Look at a file attached to a note: images (photos, screenshots) and PDFs are shown to you directly; text files are returned as text. Use the file name or id listed by read_note.',
+      inputSchema: z.object({ file: z.string().describe('File name or numeric id') }),
+    }, ({ file }) => {
+      const a = deps.findAttachment?.(file, uid);
+      if (!a) return `No attachment "${file}" found. Use read_note to see a note's attachments.`;
+      if (a.mime.startsWith('text/') || a.mime === 'application/json') return `${a.name}:\n\n${trunc(a.read().toString('utf8'), 60000)}`;
+      if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(a.mime)) {
+        if (a.size > 5 * 1024 * 1024) return `${a.name} is ${(a.size / 1048576).toFixed(1)} MB – images over 5 MB can't be viewed. Ask the user for a smaller copy.`;
+        return [{ type: 'text', text: `Image ${a.name}:` }, { type: 'image', source: { type: 'base64', media_type: a.mime, data: a.read().toString('base64') } }];
+      }
+      if (a.mime === 'application/pdf') {
+        if (a.size > 30 * 1024 * 1024) return `${a.name} is too large to read (over 30 MB).`;
+        return [{ type: 'text', text: `PDF ${a.name}:` }, { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.read().toString('base64') }, title: a.name }];
+      }
+      if (a.mime.startsWith('audio/')) return `${a.name} is an audio recording. You can't listen to audio; if a transcript was captured with it, it is in the note text next to the recording.`;
+      if (a.mime === 'image/heic') return `${a.name} is a HEIC photo, which can't be viewed. On iPhone set Camera → Formats → Most Compatible, or share it as JPEG.`;
+      return `${a.name} (${a.mime}) can't be read directly.`;
+    }, ({ file }) => `Opened attachment “${file}”`),
 
     tool({
       name: 'list_notes',
@@ -171,7 +196,7 @@ export function buildTools({ deps, user, tz }) {
         lines.splice(end, 0, text);
         next = lines.join('\n');
       } else next = content.replace(/\s*$/, '') + '\n\n' + text + '\n';
-      saveNote(uid, { id, content: next }, origin);
+      saveNote(uid, { id, content: next, revReason: 'Before an edit by Claude' }, origin);
       return `Appended to [[${title}]].`;
     }, ({ title }) => `Added to “${title}”`),
 
@@ -185,7 +210,7 @@ export function buildTools({ deps, user, tz }) {
       const { content } = getNote(id, uid);
       const count = content.split(old_text).length - 1;
       if (count !== 1) return `old_text appears ${count} times in [[${title}]] – it must appear exactly once. Read the note and use a longer, unique excerpt.`;
-      saveNote(uid, { id, content: content.replace(old_text, () => new_text) }, origin);
+      saveNote(uid, { id, content: content.replace(old_text, () => new_text), revReason: 'Before an edit by Claude' }, origin);
       return `Updated [[${title}]].`;
     }, ({ title }) => `Edited “${title}”`),
 
@@ -207,7 +232,7 @@ export function buildTools({ deps, user, tz }) {
           const who = (e.who.length ? e.who : cal?.user_id ? [cal.user_id] : []).map(name).filter(Boolean);
           return `- ${fmtLocal(e.start, e.all_day)}${e.all_day ? ' (all day)' : `–${fmtLocal(e.end).split(', ').pop()}`}: ${e.title}${e.location ? ` @ ${e.location}` : ''} · ${who.join(' & ') || 'everyone'} · ${cal?.name}${e.rrule ? ' · repeats' : ''}`;
         });
-      const ts = tasks.filter((t) => t.due >= from && t.due <= to).map((t) => `- ${t.due}: [${t.done ? 'x' : ' '}] ${t.text} (task in [[${t.note_title}]])`);
+      const ts = tasks.filter((t) => t.due >= from && t.due <= to && !aiHidden(t.note_id)).map((t) => `- ${t.due}: [${t.done ? 'x' : ' '}] ${t.text} (task in [[${t.note_title}]])`);
       return [...evs, ...ts].join('\n') || 'Nothing scheduled in that range.';
     }, ({ from, to }) => `Checked the calendar ${from}${to !== from ? ` → ${to}` : ''}`),
 
@@ -237,6 +262,18 @@ export function buildTools({ deps, user, tz }) {
       const r = await createEvent(uid, { calendar_id: cal.id, title: i.title, start, end, all_day: allDay, tz, who: userIds(i.who), location: i.location, description: i.description, rrule }, origin);
       return `Added "${i.title}" on ${fmtLocal(allDay ? start : start, allDay)} to the ${r.calendar} calendar.`;
     }, (i) => `Added event “${i.title}”`),
+
+    tool({
+      name: 'server_status',
+      readOnly: true,
+      description: 'Live status of the household\'s Unraid server: array state and space, each disk\'s health and temperature, and Docker containers. Also includes the #service health checks.',
+      inputSchema: z.object({}),
+    }, () => {
+      const u = deps.unraid?.();
+      const svc = q(`SELECT n.id, n.title FROM notes n JOIN tags t ON t.note_id = n.id AND t.tag = 'service' WHERE ${visible}`).all({ uid })
+        .map((r) => { const h = health.get(r.id); return h ? `- ${r.title}: ${h.down ? 'DOWN' : h.ok ? `up (${h.ms} ms)` : 'failing'}` : null; }).filter(Boolean);
+      return `${u || 'Unraid isn\'t connected to Nexus (set UNRAID_URL and UNRAID_API_KEY).'}${svc.length ? `\n\nService checks:\n${svc.join('\n')}` : ''}`;
+    }, () => 'Checked the server'),
 
     tool({
       name: 'list_tasks',
