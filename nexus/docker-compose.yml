@@ -1,0 +1,17 @@
+services:
+  nexus:
+    build: .
+    container_name: nexus
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: America/Chicago                 # your time zone (used for floating-time ICS events)
+      # PUBLIC_URL: https://nexus.example.com   # required for Google/Outlook sign-in redirects
+      # GOOGLE_CLIENT_ID: ""
+      # GOOGLE_CLIENT_SECRET: ""
+      # MS_CLIENT_ID: ""
+      # MS_CLIENT_SECRET: ""
+      # MS_TENANT: common                 # or "consumers" for personal Outlook.com only
