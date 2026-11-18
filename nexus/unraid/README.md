@@ -158,6 +158,31 @@ To enter the IDs and secrets: edit the container, click **Show more settings**, 
 
 When new code is pushed to the default branch, the Docker tab shows **update ready** next to Nexus. Click **apply update**. The database is migrated in place, and your data stays in appdata.
 
+### New settings fields after an update
+Your installed template keeps your values, so new settings don't appear on their own. Run this once in the Unraid terminal:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/dustinlhowell/OKCREPORTER/HEAD/nexus/unraid/add-template-fields.sh | sh
+```
+
+It adds any missing fields and keeps everything you've filled in; it also saves a backup of the old template. Then refresh the page and go to **Docker → Nexus → Edit → Show more settings**. The fields it adds are for:
+- email/push notifications
+- Unraid status
+- off-server backups
+- the weekly review
+
+### Recommended: off-server backups
+1. Create a Backblaze B2 bucket and an application key limited to that bucket.
+2. Fill in the **Backup: S3 …** fields: endpoint `https://s3.<region>.backblazeb2.com` and region, e.g. `us-west-004`.
+3. Set a long **Backup: passphrase** and store it in your password manager.
+4. In Nexus, go to **Settings → Backups → Back up now** to confirm it works.
+
+Or point **Backup: copy to folder** at an Unassigned Devices disk and set **Backup: copy dir** to `/backup-copy`.
+
+### Unraid status on the Home page
+1. In Unraid, go to **Settings → Management Access → API Keys** and create a key with read access.
+2. Put your server's address (e.g. `http://192.168.1.10`) and the key into **Unraid API URL** and **Unraid API key**.
+
 ## Backups and restore
 
 - **Built-in snapshots:** every night Nexus writes a consistent copy of the database to `/mnt/user/appdata/nexus/backups/nexus-YYYY-MM-DD.db` and keeps the newest 14. You can change the number with *Backups to keep* in the template.

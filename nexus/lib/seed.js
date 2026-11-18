@@ -19,6 +19,16 @@ export const SUPERTAGS = [
     template: 'date:: \nattendees:: \n\n## Notes\n- \n\n## Action items\n- [ ] \n' },
 ];
 
+SUPERTAGS.push(
+  { name: 'bill', color: '#e11d48', icon: '💳', folder: 'Household',
+    fields: [{ name: 'amount', type: 'number' }, { name: 'due day', type: 'number' }, { name: 'autopay', type: 'select', options: ['yes', 'no'] },
+      { name: 'account', type: 'text' }, { name: 'paid by', type: 'text' }, { name: 'status', type: 'select', options: ['active', 'paused', 'cancelled'] }],
+    template: 'amount:: \ndue day:: \nautopay:: no\naccount:: \npaid by:: \nstatus:: active\n\n- [ ] Pay this bill @every month\n' },
+  { name: 'chore', color: '#0d9488', icon: '🧹', folder: 'Household',
+    fields: [{ name: 'assignee', type: 'text' }, { name: 'area', type: 'select', options: ['kitchen', 'bathroom', 'yard', 'garage', 'house', 'car'] }, { name: 'last done', type: 'date' }],
+    template: 'assignee:: \narea:: house\nlast done:: \n\n- [ ] Do it @every week\n' },
+);
+
 export const NOTES = [
   { title: 'Welcome to Nexus', folder: '', pinned: 1, icon: '👋', content: `Your household second brain: notes, knowledge base, homelab docs and a shared calendar in one place.
 
@@ -103,4 +113,16 @@ apt update && apt full-upgrade -y
 - [ ] Apply kernel updates and reboot @${new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10)}
 - [x] Replace failed SSD in ZFS mirror
 ` },
+  { title: 'Groceries', folder: 'Household', icon: '🛒', pinned: 1, content: `Shared shopping list – tick things off in the store; add from your phone with *"add milk to the groceries list"* in the Claude app.
+
+## Groceries
+- [ ] Milk
+- [ ] Eggs
+
+## Household & pharmacy
+- [ ] 
+
+> [!tip] Bills and chores
+> Use the **#bill** and **#chore** databases in the sidebar. Bills and chores get a repeating task (\`@every month\`), so they show up in Tasks and on the calendar and roll forward when you tick them.
+` }
 ];

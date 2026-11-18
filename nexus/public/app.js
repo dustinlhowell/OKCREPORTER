@@ -76,13 +76,18 @@ async function showAuth() {
     <form>${setup ? '<input name="name" placeholder="Your name" required autocomplete="name">' : ''}
       <input name="email" type="email" placeholder="Email" required autocomplete="username">
       <input name="password" type="password" placeholder="Password${setup ? ' (8+ characters)' : ''}" required minlength="${setup ? 8 : 1}" autocomplete="${setup ? 'new-password' : 'current-password'}">
+      <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code from your authenticator app" hidden>
       <button class="btn primary">${setup ? 'Create workspace' : 'Sign in'}</button><p class="err"></p></form></div>`;
   const f = $('form');
   f.onsubmit = async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(f));
-    try { await api('POST', setup ? '/api/setup' : '/api/login', body); location.reload(); }
-    catch (err) { $('.err').textContent = err.message; }
+    if (!body.code) delete body.code;
+    try {
+      const r = await api('POST', setup ? '/api/setup' : '/api/login', body);
+      if (r.totp) { const c = f.code; c.hidden = false; c.required = true; c.focus(); $('.err').textContent = 'Two-step sign-in is on – enter the code from your authenticator app (or a recovery code).'; return; }
+      location.reload();
+    } catch (err) { $('.err').textContent = err.message; }
   };
 }
 
@@ -128,7 +133,7 @@ function renderSidebar() {
   const route = location.hash.slice(1) || '/home';
   const navItem = (href, icon, label, badge) => `<a href="#${href}" class="${route.startsWith(href) ? 'active' : ''}"><span class="ni">${icon}</span>${label}${badge ? `<span class="badge">${badge}</span>` : ''}</a>`;
   $('#nav').innerHTML = navItem('/home', '🏠', 'Home') + navItem('/calendar', '📅', 'Calendar') + navItem('/claude', '✨', 'Ask Claude') + `<a href="#/daily" class="${route.startsWith('/daily') ? 'active' : ''}"><span class="ni">📓</span>Today's note</a>` +
-    navItem('/tasks', '✅', 'Tasks') + navItem('/review', '🃏', 'Review', state.due || '') + navItem('/graph', '🕸️', 'Graph') + navItem('/settings', '⚙️', 'Settings');
+    navItem('/tasks', '✅', 'Tasks') + navItem('/review', '🃏', 'Review', state.due || '') + navItem('/graph', '🕸️', 'Graph') + navItem('/settings', '⚙️', 'Settings') + navItem('/trash', '🗑️', 'Trash');
 
   const counts = new Map(state.tagCounts.map((t) => [t.tag, t.count]));
   const supers = state.supertags.map((s) => `<a href="#/db/${encodeURIComponent(s.name)}" class="${route === '/db/' + s.name ? 'active' : ''}"><span class="ni">${esc(s.icon || '#')}</span>${esc(s.name)}<span class="cnt">${counts.get(s.name) || 0}</span></a>`).join('');
@@ -195,6 +200,7 @@ async function route() {
     else if (h.startsWith('/graph')) await viewGraph(main);
     else if (h.startsWith('/claude')) { const { viewClaude } = await import('./claude.js'); current = { name: 'claude', ...(await viewClaude(main, app, new URLSearchParams(h.split('?')[1] || ''))) }; }
     else if (h.startsWith('/settings')) await viewSettings(main, new URLSearchParams(h.split('?')[1] || ''));
+    else if (h.startsWith('/trash')) await viewTrash(main);
     else await viewHome(main);
   } catch (err) {
     if (err.status === 404) main.innerHTML = `<div class="page"><div class="empty-state">That page doesn't exist (anymore). <a href="#/home">Go home</a></div></div>`;
@@ -258,6 +264,7 @@ async function viewNote(main, id) {
   main.innerHTML = `<div class="note">
     <div class="ntop"><span class="crumb" title="Move to folder">📁 ${esc(n.folder || 'Notes')}</span><span class="status" id="saveState"></span><span class="sp"></span>
       <div class="seg" id="modeSeg">${['edit', 'split', 'read'].map((m) => `<button data-m="${m}">${m[0].toUpperCase() + m.slice(1)}</button>`).join('')}</div>
+      <button class="iconbtn" id="attachBtn" title="Attach a file or record a voice memo">📎</button>
       <a class="iconbtn" href="#/claude?note=${n.id}" title="Ask Claude about this note">✨</a>
       <button class="iconbtn" id="pinBtn" title="Pin">${n.pinned ? '📌' : '📍'}</button>
       <button class="iconbtn" id="moreBtn" title="More">⋯</button></div>
@@ -266,7 +273,7 @@ async function viewNote(main, id) {
     ${isDaily ? `<div class="dailynav"><a href="#/daily/${dstr(new Date(new Date(n.title + 'T12:00').getTime() - 864e5))}">‹ Previous day</a><span>${new Date(n.title + 'T12:00').toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</span><a href="#/daily/${dstr(new Date(new Date(n.title + 'T12:00').getTime() + 864e5))}">Next day ›</a></div>` : ''}
     <div id="propForm"></div>
     <div class="nbody" id="nbody"><textarea class="editor" id="ed" spellcheck="true" placeholder="Start writing…  Type / for commands, [[ to link, # to tag."></textarea><article class="preview md" id="pv"></article></div>
-    <div class="nfoot muted">Edited ${ago(n.updated)}${n.updated_by_name ? ` by ${esc(n.updated_by_name)}` : ''} · ${n.private ? '🔒 Private to you' : '👥 Shared with household'}</div>
+    <div class="nfoot muted">Edited ${ago(n.updated)}${n.updated_by_name ? ` by ${esc(n.updated_by_name)}` : ''} · ${n.private ? '🔒 Private to you' : '👥 Shared with household'}${n.ai_hidden ? ` · 🙈 Hidden from AI${n.noai ? '' : ' (folder setting)'}` : ''}</div>
   </div>
   <aside class="rpanel" id="rpanel"></aside>`;
 
@@ -329,7 +336,10 @@ async function viewNote(main, id) {
     const content = ed.value;
     try {
       const r = await api('PUT', `/api/notes/${id}`, { content, base: force ? undefined : base });
-      base = r.updated; n.content = content; status('Saved', 'ok');
+      base = r.updated; n.content = r.content ?? content; status('Saved', 'ok');
+      if (r.content !== undefined && ed.value === content) { // server added the next occurrence of a recurring task
+        const sel = [ed.selectionStart, ed.selectionEnd]; ed.value = r.content; ed.setSelectionRange(...sel); drawPreview(); toast('Next occurrence added 🔁');
+      }
       const ln = state.byId.get(id); if (ln) ln.updated = r.updated;
       refreshNotes();
     } catch (err) {
@@ -349,7 +359,7 @@ async function viewNote(main, id) {
   }
   const autosave = debounce(() => save(), 700);
   const livePreview = debounce(() => { if (mode !== 'edit') drawPreview(); drawProps(); }, ed.value.length > 50000 ? 400 : 120);
-  const rightLater = debounce(drawRight, 1500);
+  const rightLater = debounce(() => drawRight().then(drawFiles), 1500);
 
   ed.addEventListener('input', () => { dirty = true; status('Editing…'); autosave(); livePreview(); rightLater(); });
   enhanceEditor(ed, {
@@ -357,6 +367,53 @@ async function viewNote(main, id) {
     tags: () => { const s = new Map(state.supertags.map((t) => [t.name, { name: t.name, icon: t.icon, super: true }])); for (const t of state.tagCounts) if (!s.has(t.tag)) s.set(t.tag, { name: t.tag }); return [...s.values()]; },
     templates: () => state.supertags,
     onSave: () => autosave.flush(),
+  });
+
+  // ---- attachments: paste, drag & drop, 📎 menu, in-browser voice recorder
+  const insertAtCursor = (text) => {
+    if (mode === 'read') setMode('split');
+    ed.focus();
+    const pos = ed.selectionStart, before = ed.value.slice(0, pos);
+    const pre = before && !before.endsWith('\n') ? '\n' : '';
+    ed.setRangeText(`${pre}${text}\n`, pos, ed.selectionEnd, 'end');
+    ed.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  async function uploadFiles(files) {
+    for (const f of files) {
+      if (!f || !f.size) continue;
+      status(`Uploading ${f.name}…`);
+      try {
+        const res = await fetch(`/api/files?note=${id}&name=${encodeURIComponent(f.name || 'file')}`, { method: 'POST', body: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-client-id': clientId } });
+        const j = await res.json(); if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+        insertAtCursor(j.markdown); status('Uploaded', 'ok');
+      } catch (err) { toast(`Upload failed: ${err.message}`, 'error'); status('Upload failed', 'err'); }
+    }
+    drawFiles();
+  }
+  ed.addEventListener('paste', (e) => { const files = [...(e.clipboardData?.files || [])]; if (files.length) { e.preventDefault(); uploadFiles(files); } });
+  for (const el of [ed, pv]) {
+    el.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); el.classList.add('dropping'); } });
+    el.addEventListener('dragleave', () => el.classList.remove('dropping'));
+    el.addEventListener('drop', (e) => { el.classList.remove('dropping'); if (e.dataTransfer?.files.length) { e.preventDefault(); uploadFiles([...e.dataTransfer.files]); } });
+  }
+  $('#attachBtn').onclick = () => modal('Attach', `<div class="menu"><button data-x="file">📎 Attach files (images, PDFs, anything)</button><button data-x="rec">🎙️ Record a voice memo</button></div>`, (box, close) => {
+    box.onclick = (e) => {
+      const x = e.target.closest('[data-x]')?.dataset.x; if (!x) return;
+      close();
+      if (x === 'file') { const inp = Object.assign(document.createElement('input'), { type: 'file', multiple: true }); inp.onchange = () => uploadFiles([...inp.files]); inp.click(); }
+      if (x === 'rec') recordMemo((file, note) => { uploadFiles([file]).then(() => note && insertAtCursor(note)); });
+    };
+  });
+  const drawFiles = async () => {
+    const files = await api('GET', `/api/notes/${id}/files`).catch(() => []);
+    let box = $('#rfiles');
+    if (!files.length) { box?.remove(); return; }
+    if (!box) { box = document.createElement('div'); box.className = 'rsec'; box.id = 'rfiles'; $('#rpanel')?.prepend(box); }
+    box.innerHTML = `<h4>Attachments <span class="cnt">${files.length}</span></h4>${files.map((f) => `<div class="fileitem"><a href="${esc(f.url)}" target="_blank" rel="noopener">${f.mime.startsWith('image/') ? '🖼️' : f.mime.startsWith('audio/') ? '🎙️' : f.mime === 'application/pdf' ? '📄' : '📎'} ${esc(f.name)}</a><span class="muted">${f.size > 1048576 ? (f.size / 1048576).toFixed(1) + ' MB' : Math.ceil(f.size / 1024) + ' KB'}</span><button class="iconbtn sm" data-delfile="${f.id}" title="Delete file">✕</button></div>`).join('')}`;
+  };
+  $('#rpanel').addEventListener('click', async (e) => {
+    const d = e.target.dataset.delfile;
+    if (d && confirm('Delete this file? Links to it in the note will stop working.')) { await api('DELETE', `/api/files/${d}`); drawFiles(); }
   });
 
   $('#propForm').addEventListener('change', (e) => {
@@ -390,9 +447,11 @@ async function viewNote(main, id) {
   $('#moreBtn').onclick = () => modal('Note', `<div class="menu">
       <button data-a="move">📁 Move to folder…</button>
       <button data-a="private">${n.private ? '👥 Share with household' : '🔒 Make private (only you)'}</button>
+      <button data-a="noai">${n.noai ? '🤖 Allow Claude to read this note' : '🙈 Hide from AI (Claude can’t read it)'}</button>
       <button data-a="md">⬇️ Download as Markdown</button>
       <button data-a="copy">🔗 Copy link</button>
-      <button data-a="del" class="danger">🗑️ Delete note</button></div>`, (box, close) => {
+      <button data-a="history">🕘 Version history</button>
+      <button data-a="del" class="danger">🗑️ Move to trash</button></div>`, (box, close) => {
     box.onclick = async (e) => {
       const a = e.target.closest('[data-a]')?.dataset.a; if (!a) return;
       close();
@@ -400,7 +459,9 @@ async function viewNote(main, id) {
       if (a === 'private') { n.private = !n.private; await api('PUT', `/api/notes/${id}`, { private: n.private }); toast(n.private ? 'Now private to you' : 'Shared with household'); route(); }
       if (a === 'md') { const b = new Blob([ed.value], { type: 'text/markdown' }); const u = URL.createObjectURL(b); Object.assign(document.createElement('a'), { href: u, download: `${n.title}.md` }).click(); URL.revokeObjectURL(u); }
       if (a === 'copy') { navigator.clipboard?.writeText(location.href); toast('Link copied'); }
-      if (a === 'del' && confirm(`Delete “${n.title}”? This can't be undone.`)) { await api('DELETE', `/api/notes/${id}`); dirty = false; await loadNotes(); app.go('/home'); }
+      if (a === 'noai') { n.noai = !n.noai; await api('PUT', `/api/notes/${id}`, { noai: n.noai }); toast(n.noai ? 'Hidden from AI' : 'Claude can read this note again'); route(); }
+      if (a === 'history') { await save(); showHistory(n, () => route()); }
+      if (a === 'del' && confirm(`Move “${n.title}” to the trash? You can restore it for 30 days.`)) { await api('DELETE', `/api/notes/${id}`); dirty = false; await loadNotes(); toast('Moved to trash'); app.go('/home'); }
     };
   });
 
@@ -433,7 +494,7 @@ async function viewNote(main, id) {
     else pv.querySelector(`[data-line="${line}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
-  setMode(mode); drawProps(); drawRight();
+  setMode(mode); drawProps(); drawRight().then(drawFiles);
   if (LS.get('focusTitle') === id) { LS.set('focusTitle', 0); $('#titleIn').focus(); $('#titleIn').select(); }
 
   const onRemote = async (d) => {
@@ -445,15 +506,54 @@ async function viewNote(main, id) {
     const sel = [ed.selectionStart, ed.selectionEnd];
     Object.assign(n, fresh); base = fresh.updated; ed.value = fresh.content; grow();
     if (document.activeElement === ed) ed.setSelectionRange(...sel);
-    drawPreview(); drawProps(); drawRight();
+    drawPreview(); drawProps(); drawRight().then(drawFiles);
     status(`Updated by ${fresh.updated_by_name || 'someone'}`, 'ok');
   };
-  const onEvents = () => isDaily && drawRight();
+  const onEvents = () => isDaily && drawRight().then(drawFiles);
   on('remote-note', onRemote); on('events', onEvents);
   const beforeUnload = (e) => { if (dirty) { save(); e.preventDefault(); } };
   addEventListener('beforeunload', beforeUnload);
   current = { name: 'note', id, setMode: () => setMode(mode === 'read' ? LS.get('note.lastEdit', 'split') : 'read'), save: () => autosave.flush(),
     teardown: async () => { alive = false; listeners['remote-note']?.delete(onRemote); listeners.events?.delete(onEvents); removeEventListener('beforeunload', beforeUnload); autosave.cancel(); if (dirty) await save(); } };
+}
+
+// In-browser voice memo recorder (works on iPhone Safari 14.3+, Android, desktop).
+function recordMemo(onDone) {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return toast('Recording isn’t supported in this browser – use the 📎 button to attach a recording instead.', 'error');
+  modal('Voice memo', `<div class="rec"><div class="rtime" id="rtime">0:00</div><div class="rlevel"><i id="rlevel"></i></div>
+    <button class="btn primary big" id="rbtn">● Start recording</button>
+    <textarea id="rnote" rows="2" placeholder="Optional: a line about this memo"></textarea><p class="small muted">Recordings are saved into this note as playable audio. Nexus doesn't transcribe audio; for text, dictate with your keyboard's mic.</p></div>`, (box, close) => {
+    let rec, stream, chunks = [], t0, timer, raf;
+    const btn = box.querySelector('#rbtn');
+    const stopAll = () => { clearInterval(timer); cancelAnimationFrame(raf); stream?.getTracks().forEach((t) => t.stop()); };
+    box.closest('.overlay').addEventListener('click', (e) => { if (e.target.classList.contains('overlay')) stopAll(); });
+    box.querySelector('.x')?.addEventListener('click', stopAll);
+    btn.onclick = async () => {
+      if (rec?.state === 'recording') { rec.stop(); btn.disabled = true; btn.textContent = 'Saving…'; return; }
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { return toast('Microphone permission was denied.', 'error'); }
+      const type = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+      rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+      rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      rec.onstop = () => {
+        stopAll();
+        const mime = (rec.mimeType || type || 'audio/webm').split(';')[0];
+        const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
+        const stamp = new Date().toLocaleString('sv').slice(0, 16).replace(' ', '-').replace(':', '');
+        const file = new File(chunks, `voice-memo-${stamp}.${ext}`, { type: mime });
+        const note = box.querySelector('#rnote').value.trim();
+        close(); onDone(file, note);
+      };
+      rec.start(1000); t0 = Date.now();
+      btn.textContent = '■ Stop and save';
+      timer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); box.querySelector('#rtime').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }, 250);
+      try {
+        const ctx = new AudioContext(), an = ctx.createAnalyser(); ctx.createMediaStreamSource(stream).connect(an);
+        const buf = new Uint8Array(an.fftSize);
+        const tick = () => { an.getByteTimeDomainData(buf); let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v - 128)); const lvl = box.querySelector('#rlevel'); if (lvl) lvl.style.width = Math.min(100, m * 1.6) + '%'; raf = requestAnimationFrame(tick); };
+        tick();
+      } catch {}
+    };
+  });
 }
 
 function moveNote(n) {
@@ -469,6 +569,43 @@ function moveNote(n) {
       close(); await loadNotes(); route();
     };
   });
+}
+
+// ------------------------------------------------------------------ version history & trash
+async function showHistory(n, onRestore) {
+  const revs = await api('GET', `/api/notes/${n.id}/revisions`);
+  if (!revs.length) return toast('No earlier versions yet – they are saved as you edit.');
+  modal(`History · ${n.title}`, `<div class="hist"><div class="hlist">${revs.map((r, i) => `<button class="hitem${i ? '' : ' on'}" data-r="${r.id}"><b>${new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</b><span>${esc(r.author || '')}${r.reason ? ` · ${esc(r.reason)}` : ''}</span></button>`).join('')}</div>
+    <div class="hview"><div class="hbar"><span class="muted small">Showing the note as it was at this time.</span><button class="btn primary sm" id="hRestore">Restore this version</button></div><article class="md" id="hPrev"></article></div></div>`, async (box, close) => {
+    let cur = revs[0].id;
+    const show = async (rid) => {
+      cur = rid; box.querySelectorAll('.hitem').forEach((b) => b.classList.toggle('on', +b.dataset.r === rid));
+      const r = await api('GET', `/api/notes/${n.id}/revisions/${rid}`);
+      box.querySelector('#hPrev').innerHTML = (r.title !== n.title ? `<p class="muted">Title: <b>${esc(r.title)}</b></p>` : '') + render(r.content, mdctx());
+    };
+    box.querySelector('.hlist').onclick = (e) => { const b = e.target.closest('[data-r]'); if (b) show(+b.dataset.r); };
+    box.querySelector('#hRestore').onclick = async () => {
+      if (!confirm('Restore this version? The current version is kept in the history.')) return;
+      await api('POST', `/api/notes/${n.id}/revisions/${cur}/restore`); close(); toast('Version restored', 'ok'); await loadNotes(); onRestore?.();
+    };
+    show(cur);
+  }, 'wide');
+}
+
+async function viewTrash(main) {
+  setTitle('Trash');
+  const items = await api('GET', '/api/trash');
+  main.innerHTML = `<div class="page"><div class="dbhead"><h1>🗑️ Trash</h1><span class="sp"></span>${items.length ? '<button class="btn danger" id="emptyTrash">Empty trash</button>' : ''}</div>
+    <p class="muted">Deleted notes stay here for 30 days, then they're removed for good.</p>
+    ${items.map((n) => `<div class="calrow"><span>${esc(n.icon || '📄')}</span><div class="cinfo"><b>${esc(n.title)}</b><span class="muted">${esc(n.folder || 'Notes')} · deleted ${ago(n.deleted)}${n.deleted_by ? ` by ${esc(n.deleted_by)}` : ''} · ${Math.max(0, 30 - Math.floor((Date.now() - n.deleted) / 864e5))} days left</span></div>
+      <button class="btn sm" data-restore="${n.id}">Restore</button><button class="btn sm danger" data-purge="${n.id}">Delete forever</button></div>`).join('') || '<div class="empty-state">The trash is empty.</div>'}</div>`;
+  main.onclick = async (e) => {
+    const r = e.target.dataset.restore, p = e.target.dataset.purge;
+    if (r) { const x = await api('POST', `/api/trash/${r}/restore`); await loadNotes(); toast(`Restored “${x.title}”`, 'ok'); viewTrash(main); }
+    if (p && confirm('Delete this note forever? This can’t be undone.')) { await api('DELETE', `/api/trash/${p}`); viewTrash(main); }
+    if (e.target.id === 'emptyTrash' && confirm('Delete everything in the trash forever?')) { await api('DELETE', '/api/trash'); viewTrash(main); }
+  };
+  current = { name: 'trash', teardown: () => { main.onclick = null; } };
 }
 
 // ------------------------------------------------------------------ home dashboard
@@ -512,7 +649,14 @@ async function viewHome(main) {
       const d = r.fields['exam date'], days = d ? Math.ceil((new Date(d + 'T00:00') - start) / 864e5) : null;
       return `<a class="rlink" href="#/note/${r.id}">🎓 ${esc(r.title)}<span class="muted">${esc(r.fields.status || '')}${days !== null ? ` · ${days >= 0 ? `exam in ${days}d` : 'exam passed'}` : ''}</span></a>`;
     }).join(''));
-    $('#hLab') && ($('#hLab').className = '', $('#hLab').innerHTML = svc.rows.length ? svc.rows.map((r) => `<a class="rlink" href="#/note/${r.id}"><span class="hdot ${r.health ? (r.health.ok ? 'up' : 'down') : ''}"></span>${esc(r.title)}<span class="muted">${r.health ? (r.health.ok ? `${r.health.ms} ms` : esc(r.health.error || `HTTP ${r.health.status}`)) : esc(r.fields.host || '')}</span></a>`).join('') : '<p class="muted">Tag a note #service with a <code>url::</code> to monitor it.</p>');
+    const ur = await api('GET', '/api/unraid').catch(() => null);
+    const tb = (kb) => `${(kb / 1024 ** 3).toFixed(1)} TB`;
+    const unraidHtml = ur?.configured ? (ur.status ? `<div class="unraid"><div class="urow"><b>🖥️ Unraid</b><span class="muted">${esc((ur.status.state || '?').toLowerCase())}${ur.status.capacity ? ` · ${tb(ur.status.capacity.free)} free of ${tb(ur.status.capacity.total)}` : ''}</span></div>
+      ${ur.status.capacity ? `<div class="ubar"><i style="width:${Math.round(ur.status.capacity.used / ur.status.capacity.total * 100)}%"></i></div>` : ''}
+      <div class="udisks">${ur.status.disks.map((d) => `<span class="udisk${d.status && !/DISK_OK|DISK_NP/.test(d.status) ? ' bad' : d.temp >= 50 ? ' hot' : ''}" title="${esc(d.kind)} · ${esc(d.status || '')}">${esc(d.name)} <small>${d.temp != null ? d.temp + '°' : 'zz'}</small></span>`).join('')}</div>
+      ${ur.status.containers ? `<div class="muted small">🐳 ${ur.status.containers.filter((c) => c.state === 'RUNNING').length}/${ur.status.containers.length} containers running</div>` : ''}
+      ${ur.problems.length ? `<div class="err small">⚠ ${ur.problems.map((p) => esc(p.text)).join(' · ')}</div>` : ''}</div>` : '<p class="muted small">🖥️ Unraid: waiting for first status…</p>') : '';
+    $('#hLab') && ($('#hLab').className = '', $('#hLab').innerHTML = unraidHtml + (svc.rows.length ? svc.rows.map((r) => `<a class="rlink" href="#/note/${r.id}"><span class="hdot ${r.health ? (r.health.ok ? 'up' : 'down') : ''}"></span>${esc(r.title)}<span class="muted">${r.health ? (r.health.ok ? `${r.health.ms} ms` : esc(r.health.error || `HTTP ${r.health.status}`)) : esc(r.fields.host || '')}</span></a>`).join('') : '<p class="muted">Tag a note #service with a <code>url::</code> to monitor it.</p>'));
     if ($('#hTasks')) $('#hTasks').onchange = async (e) => { const c = e.target; await api('POST', `/api/notes/${c.dataset.n}/task`, { line: +c.dataset.l, done: c.checked }); toast(c.checked ? 'Task completed' : 'Task reopened'); };
   };
   fillRest().catch(() => {});
@@ -683,13 +827,51 @@ async function viewTasks(main) {
 async function viewReview(main, params) {
   setTitle('Review');
   if (params.get('note') || params.get('go') || params.get('scope')) return studySession(main, params);
-  const s = await api('GET', '/api/cards/stats');
+  const [s, hist] = await Promise.all([api('GET', '/api/cards/stats'), api('GET', '/api/cards/history')]);
   state.due = s.due || 0;
   main.innerHTML = `<div class="page"><h1>Review</h1><p class="muted">Spaced repetition for everything you're studying. Cards come from <code>Question ?? Answer</code> lines and <code>Q:</code>/<code>A:</code> pairs in any note.</p>
-    <div class="tiles"><div class="tile"><b>${s.due || 0}</b><span>due now</span></div><div class="tile"><b>${s.new || 0}</b><span>new</span></div><div class="tile"><b>${s.mature || 0}</b><span>mature</span></div><div class="tile"><b>${s.total || 0}</b><span>total</span></div></div>
+    <div class="tiles"><div class="tile"><b>${hist.streak ? '🔥 ' + hist.streak : 0}</b><span>day streak</span></div><div class="tile"><b>${hist.week}</b><span>reviewed this week</span></div><div class="tile"><b>${hist.retention == null ? '–' : hist.retention + '%'}</b><span>recalled (30 days)</span></div><div class="tile"><b>${s.due || 0}</b><span>due now</span></div></div>
+    ${studyChart(hist.days)}
+    <div class="tiles"><div class="tile"><b>${s.new || 0}</b><span>new</span></div><div class="tile"><b>${s.mature || 0}</b><span>mature</span></div><div class="tile"><b>${s.total || 0}</b><span>total</span></div></div>
     ${s.due ? '<a class="btn primary big" href="#/review?go=1">Study all due cards</a>' : '<p>🎉 Nothing due. Come back later, or cram a deck below.</p>'}
     <h3>Decks</h3><div class="decks">${s.decks.map((d) => `<div class="deck"><a href="#/note/${d.id}">${esc(d.icon || '📄')} ${esc(d.title)}</a><span class="muted">${d.due || 0} due · ${d.total} cards</span><a class="btn sm" href="#/review?note=${d.id}">${d.due ? 'Study' : 'Cram'}</a></div>`).join('') || '<p class="muted">No flashcards yet.</p>'}</div></div>`;
 }
+// 30-day review history: one series, columns (<=24px, 4px rounded tops, square at the baseline), recessive axis,
+// only the peak labelled, hover/focus tooltip, and a table view.
+function studyChart(days) {
+  const max = Math.max(...days.map((d) => d.count));
+  if (!max) return '<p class="muted small">Your daily review chart appears here once you start studying.</p>';
+  const W = 600, H = 150, top = 18, base = H - 22, n = days.length, slot = W / n, bw = Math.min(24, slot * 0.62); // capped column width; the rest of the slot is air
+  const yMax = Math.max(4, Math.ceil(max / 4) * 4), y = (v) => base - (v / yMax) * (base - top);
+  const fmt = (d) => new Date(d + 'T12:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const peak = days.reduce((a, b) => (b.count >= a.count ? b : a));
+  const bars = days.map((d, i) => {
+    const x = i * slot + (slot - bw) / 2, h = base - y(d.count), r = Math.min(4, h);
+    const path = d.count ? `M${x},${base} V${base - h + r} Q${x},${base - h} ${x + r},${base - h} H${x + bw - r} Q${x + bw},${base - h} ${x + bw},${base - h + r} V${base} Z` : '';
+    return `<g class="sbar" tabindex="0" data-tip="${fmt(d.date)}: ${d.count} card${d.count === 1 ? '' : 's'}" aria-label="${fmt(d.date)}: ${d.count} cards reviewed">
+      <rect x="${i * slot}" y="${top}" width="${slot}" height="${base - top}" fill="transparent"/>${path ? `<path d="${path}"/>` : ''}
+      ${d === peak ? `<text x="${x + bw / 2}" y="${y(d.count) - 5}" text-anchor="middle" class="sval">${d.count}</text>` : ''}</g>`;
+  }).join('');
+  const ticks = [0, yMax / 2, yMax].map((v) => `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" class="sgrid"/><text x="0" y="${y(v) - 3}" class="saxis">${v}</text>`).join('');
+  const labels = [0, Math.floor(n / 2), n - 1].map((i) => `<text x="${i * slot + slot / 2}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}" class="saxis">${i === n - 1 ? 'Today' : fmt(days[i].date)}</text>`).join('');
+  return `<figure class="schart"><figcaption>Cards reviewed per day · last 30 days</figcaption>
+    <div class="swrap"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cards reviewed per day over the last 30 days, peak ${peak.count} on ${fmt(peak.date)}">${ticks}${bars}${labels}</svg><div class="stip" hidden></div></div>
+    <details><summary class="small muted">Show as table</summary><table class="stable"><thead><tr><th>Day</th><th>Cards reviewed</th></tr></thead><tbody>${days.slice().reverse().map((d) => `<tr><td>${fmt(d.date)}</td><td>${d.count}</td></tr>`).join('')}</tbody></table></details></figure>`;
+}
+document.addEventListener('pointerover', (e) => chartTip(e.target.closest?.('.sbar')));
+document.addEventListener('focusin', (e) => chartTip(e.target.closest?.('.sbar')));
+document.addEventListener('pointerout', (e) => { if (e.target.closest?.('.sbar')) chartTip(null); });
+function chartTip(g) {
+  document.querySelectorAll('.sbar.on').forEach((x) => x.classList.remove('on'));
+  const wrap = g?.closest('.swrap') || document.querySelector('.swrap'); const tip = wrap?.querySelector('.stip');
+  if (!tip) return;
+  if (!g) { tip.hidden = true; return; }
+  g.classList.add('on');
+  const r = g.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  tip.textContent = g.dataset.tip; tip.hidden = false;
+  tip.style.left = Math.max(0, Math.min(wr.width - tip.offsetWidth, r.left - wr.left + r.width / 2 - tip.offsetWidth / 2)) + 'px';
+}
+
 async function studySession(main, params) {
   const cards = params.get('note') ? await api('GET', `/api/cards/due?note=${params.get('note')}`) : await api('GET', `/api/cards/due${params.get('scope') ? `?scope=${encodeURIComponent(params.get('scope'))}` : ''}`);
   let i = 0, shown = false, done = 0;
@@ -736,6 +918,7 @@ async function viewSettings(main, params) {
     ${c.mine || c.user_id === null ? `<input type="color" value="${c.color}" data-color title="Color">` : ''}
     ${c.mine && c.kind !== 'local' ? '<button class="btn sm" data-sync>Sync</button>' : ''}
     ${c.mine && (c.kind === 'google' || c.kind === 'outlook') ? '<button class="btn sm" data-pick>Choose calendar</button>' : ''}
+    ${c.mine && c.kind === 'outlook' ? `<button class="btn sm" data-mail>📧 Email → calendar${c.mailWatch?.enabled ? ' ✓' : ''}</button>` : ''}
     ${c.mine ? `<label class="sm"><input type="checkbox" data-shared ${c.shared ? 'checked' : ''}> Visible to household</label>` : ''}
     ${c.mine || (c.user_id === null && c.kind !== 'local') ? '<button class="iconbtn sm" data-del title="Remove">🗑</button>' : ''}</div>`;
   main.innerHTML = `<div class="page settings"><h1>Settings</h1>
@@ -763,9 +946,22 @@ async function viewSettings(main, params) {
   </section>
   <section class="panel"><h3>Household members</h3>${state.users.map((u) => `<div class="calrow"><span class="avatar" style="background:${u.color}">${esc(u.name[0])}</span><b>${esc(u.name)}</b>${u.id === me.id ? '<span class="muted">(you)</span>' : ''}</div>`).join('')}
     <form id="addUser" class="row wrap"><input name="name" placeholder="Name" required><input name="email" type="email" placeholder="Email" required><input name="password" type="password" placeholder="Temporary password (8+)" minlength="8" required><button class="btn primary">Add member</button></form></section>
+  <section class="panel" id="notif"><h3>Notifications</h3><div id="notifBody" class="muted small">Loading…</div></section>
+  <section class="panel" id="security"><h3>Two-step sign-in</h3>
+    ${state.security?.totp
+      ? `<p>✅ <b>On.</b> Signing in needs your password and a code from your authenticator app. ${state.security.recoveryLeft} recovery code${state.security.recoveryLeft === 1 ? '' : 's'} left.</p>
+         <div class="row wrap"><button class="btn" id="newRecovery">New recovery codes</button><button class="btn danger" id="disable2fa">Turn off</button></div>`
+      : `<p>Protect your account with a 6-digit code from an authenticator app (Microsoft Authenticator, Google Authenticator, 1Password, Authy…) in addition to your password. Strongly recommended, since Nexus is reachable from the internet.</p>
+         <button class="btn primary" id="enable2fa">Turn on two-step sign-in</button>`}
+  </section>
   <section class="panel"><h3>Your profile</h3><form id="profile" class="row wrap"><input name="name" value="${esc(me.name)}"><input name="color" type="color" value="${esc(me.color)}"><button class="btn">Save</button></form>
     <form id="pw" class="row wrap"><input name="current" type="password" placeholder="Current password" required><input name="password" type="password" placeholder="New password (8+)" minlength="8" required><button class="btn">Change password</button></form></section>
+  <section class="panel" id="aipriv"><h3>AI privacy</h3>
+    <p class="muted">Notes in these folders (and their subfolders) are never read by Claude: not by Ask Claude, the phone connector or the weekly review. Use it for work notes your employer doesn't want shared with AI services. You can also hide single notes from a note's ⋯ menu.</p>
+    <div class="row wrap"><input id="aiFolders" list="aiFolderList" placeholder="e.g. Work KB, Finance" value="${esc((settings.ai_excluded_folders || []).join(', '))}"><datalist id="aiFolderList">${[...new Set(state.notes.map((x) => x.folder).filter(Boolean))].sort().map((f) => `<option value="${esc(f)}">`).join('')}</datalist><button class="btn" id="saveAi">Save</button></div>
+  </section>
   <section class="panel"><h3>Daily note template</h3><textarea id="dailyTpl" rows="6">${esc(settings.daily_template)}</textarea><button class="btn" id="saveTpl">Save template</button></section>
+  <section class="panel" id="backups"><h3>Backups</h3><div id="bkStatus" class="small muted">Loading…</div></section>
   <section class="panel"><h3>Import & export</h3><p class="muted">Import an <b>Obsidian vault</b> or a <b>Notion</b> “Markdown & CSV” export (unzipped). Frontmatter becomes properties and tags; folders are kept.</p>
     <div class="row wrap"><label class="btn">📁 Import folder<input type="file" id="impDir" webkitdirectory hidden></label><label class="btn">📄 Import .md files<input type="file" id="impFiles" accept=".md,.markdown,.txt" multiple hidden></label><a class="btn" href="/api/export">⬇️ Export everything (JSON)</a></div></section>
   </div>`;
@@ -781,6 +977,20 @@ async function viewSettings(main, params) {
         box.onclick = async (ev) => { const b = ev.target.closest('[data-cid]'); if (!b) return; await api('PATCH', `/api/calendars/${id}`, { calendarId: b.dataset.cid, name: `${me.name} · ${b.textContent.replace('⭐ ', '')}` }); close(); invalidateEvents(); route(); };
       });
     }
+    if (e.target.matches('[data-mail]')) {
+      const c = state.calendars.find((x) => x.id === +id);
+      const st = c.mailStatus;
+      modal('Email → calendar', `<p>Move or forward appointment emails (doctor, school, reservations, deliveries…) into an Outlook folder, and Nexus has Claude read them every 10 minutes: appointments go on the <b>Household</b> calendar for you, and a note goes in today's Inbox. Each email is read once, then marked as read.</p>
+        <ol class="small"><li>In Outlook, create a folder named e.g. <b>Nexus</b> (tip: add a rule to move confirmations there automatically).</li>
+        <li>In the Microsoft Entra app for Nexus → <b>API permissions</b> → add Microsoft Graph delegated permission <b>Mail.ReadWrite</b>.</li>
+        <li>${c.mailAccess ? '✅ Email access granted.' : '<a class="btn primary sm" href="/api/oauth/outlook/start?mail=1">Grant email access</a> (signs in to Microsoft again)'}</li></ol>
+        <form class="row wrap"><label><input type="checkbox" name="on" ${c.mailWatch?.enabled ? 'checked' : ''} ${c.mailAccess ? '' : 'disabled'}> Watch folder</label><input name="folder" value="${esc(c.mailWatch?.folder || 'Nexus')}" style="max-width:160px"><button class="btn" ${c.mailAccess ? '' : 'disabled'}>Save</button><button type="button" class="btn" id="mailNow" ${c.mailWatch?.enabled ? '' : 'disabled'}>Check now</button></form>
+        ${st ? `<p class="small ${st.ok ? 'muted' : 'err'}">Last check ${ago(st.at)}: ${st.ok ? `${st.processed} email${st.processed === 1 ? '' : 's'} read, ${st.added} event${st.added === 1 ? '' : 's'} added` : esc(st.error)}</p>` : ''}
+        ${state.claude?.configured ? '' : '<p class="err small">Needs Ask Claude (ANTHROPIC_API_KEY) to read the emails.</p>'}`, (box, close) => {
+        box.querySelector('form').onsubmit = async (ev) => { ev.preventDefault(); await api('PATCH', `/api/calendars/${id}`, { mailWatch: { enabled: ev.target.on.checked, folder: ev.target.folder.value } }); toast('Saved', 'ok'); close(); await loadMeta(); route(); };
+        box.querySelector('#mailNow').onclick = async () => { try { const r = await api('POST', `/api/calendars/${id}/mail/check`); toast(r.ok ? `${r.processed} email(s) read, ${r.added} event(s) added` : r.error, r.ok ? 'ok' : 'error'); close(); await loadMeta(); route(); } catch (err) { toast(err.message, 'error'); } };
+      });
+    }
     if (e.target.id === 'copyFeed') { navigator.clipboard?.writeText(feed); toast('Feed URL copied'); }
     if (e.target.id === 'rotate' && confirm('Create a new feed link? Existing subscriptions will stop updating.')) { const u = await api('PATCH', '/api/users/me', { rotateIcs: true }); state.me = { ...state.me, ...u }; route(); }
     if (e.target.id === 'addIcs') modal('Subscribe to calendar', `<form><input name="name" placeholder="Name (e.g. Work Outlook)" required autofocus><input name="url" placeholder="https://… or webcal://… .ics" required><input name="color" type="color" value="#0ea5e9">
@@ -790,6 +1000,7 @@ async function viewSettings(main, params) {
     if (e.target.id === 'addLocal') modal('New calendar', `<form><input name="name" placeholder="Name (e.g. Kids, Bills, Trips)" required autofocus><input name="color" type="color" value="#22c55e"><label><input type="checkbox" name="household" checked> Household calendar (owned by everyone)</label><div class="actions"><span class="sp"></span><button class="btn primary">Create</button></div></form>`, (box, close) => {
       $('form', box).onsubmit = async (ev) => { ev.preventDefault(); const f = ev.target; await api('POST', '/api/calendars', { kind: 'local', name: f.name.value, color: f.color.value, household: f.household.checked }); close(); route(); };
     });
+    if (e.target.id === 'saveAi') { await api('PUT', '/api/settings', { ai_excluded_folders: $('#aiFolders').value.split(',').map((x) => x.trim()).filter(Boolean) }); toast('AI privacy saved', 'ok'); }
     if (e.target.id === 'saveTpl') { await api('PUT', '/api/settings', { daily_template: $('#dailyTpl').value }); toast('Saved', 'ok'); }
   };
   main.onchange = async (e) => {
@@ -806,6 +1017,87 @@ async function viewSettings(main, params) {
       toast(`Imported ${total} notes`, 'ok'); await loadNotes(); await loadMeta(); renderSidebar();
     }
   };
+  const showCodes = (codes) => modal('Save your recovery codes', `<p>Each code works once if you lose your phone. Store them somewhere safe, e.g. your password manager.</p>
+    <pre class="codes">${codes.join('\n')}</pre><div class="actions"><button class="btn" id="copyCodes">Copy</button><span class="sp"></span><button class="btn primary" id="doneCodes">I've saved them</button></div>`, (box, close) => {
+    box.querySelector('#copyCodes').onclick = () => { navigator.clipboard?.writeText(codes.join('\n')); toast('Copied'); };
+    box.querySelector('#doneCodes').onclick = () => { close(); boot(true).then(() => route()); };
+  });
+  $('#security').addEventListener('click', async (e) => {
+    if (e.target.id === 'enable2fa') {
+      const { secret, uri } = await api('POST', '/api/2fa/setup');
+      modal('Turn on two-step sign-in', `<ol class="small"><li>Open your authenticator app and add an account by scanning this code:</li></ol>
+        <div class="qr" id="qr"></div><p class="small muted center">Can't scan? On your phone, <a href="${esc(uri)}">tap here</a>, or enter this key manually:<br><code class="key">${esc(secret.replace(/(.{4})/g, '$1 ').trim())}</code></p>
+        <ol class="small" start="2"><li>Enter the 6-digit code it shows:</li></ol>
+        <form class="row"><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" maxlength="7" required autofocus><button class="btn primary">Turn on</button></form>`, (box, close) => {
+        const s = document.createElement('script'); s.src = '/vendor/qrcode.js';
+        s.onload = () => { const qr = window.qrcode(0, 'M'); qr.addData(uri); qr.make(); box.querySelector('#qr').innerHTML = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true }); };
+        document.head.appendChild(s);
+        box.querySelector('form').onsubmit = async (ev) => {
+          ev.preventDefault();
+          try { const { codes } = await api('POST', '/api/2fa/enable', { code: ev.target.code.value }); close(); showCodes(codes); }
+          catch (err) { toast(err.message, 'error'); }
+        };
+      });
+    }
+    if (e.target.id === 'disable2fa') {
+      const password = prompt('Enter your password to turn off two-step sign-in'); if (!password) return;
+      try { await api('POST', '/api/2fa/disable', { password }); toast('Two-step sign-in is off'); await boot(true); route(); } catch (err) { toast(err.message, 'error'); }
+    }
+    if (e.target.id === 'newRecovery') {
+      const password = prompt('Enter your password to create new recovery codes (old ones stop working)'); if (!password) return;
+      try { const { codes } = await api('POST', '/api/2fa/recovery', { password }); showCodes(codes); } catch (err) { toast(err.message, 'error'); }
+    }
+  });
+  const drawNotif = async () => {
+    const { prefs: p, smtp, pushover } = await api('GET', '/api/notify');
+    const el = $('#notifBody'); el.className = '';
+    el.innerHTML = `<p class="muted">Get your morning summary, reminders and alerts on your phone. Each household member sets up their own.</p>
+      <form id="notifForm">
+      <label class="lbl">Push via ntfy <small class="muted">— free app. Pick a hard-to-guess topic, e.g. <code>https://ntfy.sh/nexus-${esc(me.name.toLowerCase())}-${Math.random().toString(36).slice(2, 8)}</code>, and subscribe to it in the ntfy app (or use your own ntfy server).</small></label>
+      <div class="row wrap"><input name="ntfy" placeholder="https://ntfy.sh/your-secret-topic" value="${esc(p.notify.ntfy || '')}"><input name="ntfyToken" placeholder="Access token (optional)" value="${esc(p.notify.ntfyToken || '')}" style="max-width:220px"></div>
+      ${pushover ? `<label class="lbl">Push via Pushover <small class="muted">— your user key from the Pushover app</small></label><input name="pushover" value="${esc(p.notify.pushover || '')}" placeholder="User key">` : ''}
+      ${smtp ? `<label class="lbl">Email</label><input name="email" type="email" value="${esc(p.notify.email || '')}" placeholder="you@example.com">` : '<p class="small muted">Email is available once SMTP is set up on the server (see README → Notifications).</p>'}
+      <label class="lbl">What to send</label>
+      <div class="checks">
+        <label><input type="checkbox" name="digest" ${p.digest.on ? 'checked' : ''}> ☀️ Morning summary at <input type="time" name="time" value="${esc(p.digest.time)}"> — today's events for both of you, tasks due, flashcards, anything down</label>
+        <label>⏰ Remind me before events <select name="lead">${[[0, 'Off'], [10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 hour'], [120, '2 hours']].map(([v, l]) => `<option value="${v}" ${+p.remind.events === v ? 'selected' : ''}>${l}</option>`).join('')}</select> (and timed tasks)</label>
+        <label><input type="checkbox" name="homelab" ${p.homelab ? 'checked' : ''}> 🔴 Homelab alerts when a #service goes down or comes back</label>
+        <label><input type="checkbox" name="weekly" ${p.weekly ? 'checked' : ''}> 🗓️ Weekly review ready</label>
+      </div>
+      <div class="actions"><button class="btn primary">Save</button><button type="button" class="btn" id="notifTest">Send a test</button><button type="button" class="btn" id="notifDigest">Send today's summary now</button></div></form>
+      <p class="small muted">Phone calendar alerts: the household calendar feed includes a 30-minute alert on each event (add <code>?alarm=10</code> to the feed URL to change it, <code>?alarm=0</code> for none). On iPhone, turn off "Remove Alerts" for the subscribed calendar.</p>`;
+    $('#notifForm').onsubmit = async (e) => {
+      e.preventDefault(); const f = e.target;
+      await api('PUT', '/api/notify', { notify: { ntfy: f.ntfy.value, ntfyToken: f.ntfyToken.value, pushover: f.pushover?.value || '', email: f.email?.value || '' },
+        digest: { on: f.digest.checked, time: f.time.value }, remind: { events: +f.lead.value }, homelab: f.homelab.checked, weekly: f.weekly.checked });
+      toast('Notification settings saved', 'ok');
+    };
+    const test = async (digest) => {
+      $('#notifForm').requestSubmit(); await new Promise((r) => setTimeout(r, 300));
+      try { const r = await api('POST', '/api/notify/test', { digest }); const bad = r.results.filter((x) => !x.ok); toast(bad.length ? `Failed: ${bad.map((x) => `${x.channel}: ${x.error}`).join('; ')}` : `Sent via ${r.results.map((x) => x.channel).join(' + ')}`, bad.length ? 'error' : 'ok'); }
+      catch (err) { toast(err.message, 'error'); }
+    };
+    $('#notifTest').onclick = () => test(false);
+    $('#notifDigest').onclick = () => test(true);
+  };
+  drawNotif().catch(() => {});
+  const drawBackups = async () => {
+    const b = await api('GET', '/api/backup'), st = b.offsite.status;
+    $('#bkStatus').className = 'small';
+    $('#bkStatus').innerHTML = `<p>📁 <b>On this server:</b> nightly snapshots in <code>appdata/nexus/backups</code>${b.local.length ? ` (latest ${esc(b.local[0].replace(/^nexus-|\.db$/g, ''))})` : ''}.</p>
+      ${b.offsite.configured
+        ? `<p>☁️ <b>Off-server:</b> ${b.offsite.s3 ? 'cloud storage' : ''}${b.offsite.s3 && b.offsite.folder ? ' + ' : ''}${b.offsite.folder ? 'backup folder' : ''}, ${b.offsite.encrypted ? '🔐 encrypted' : '⚠️ not encrypted'}.
+           ${st ? (st.ok ? `Last copy ${ago(st.at)} ✅${st.files ? ` (${st.files} new files)` : ''}` : `<span class="err">Last attempt ${ago(st.at)} failed: ${esc(st.error)}</span>`) : 'No copy yet.'}</p>
+           <button class="btn" id="bkNow">Back up now</button>`
+        : `<p>☁️ <b>Off-server: not set up.</b> If this server's disks fail, the backups go with them. Add cloud storage (e.g. Backblaze B2, about $6/TB/month) or a folder on another disk in the container settings – see the README → Backups.</p>`}`;
+  };
+  drawBackups().catch(() => {});
+  $('#backups').addEventListener('click', async (e) => {
+    if (e.target.id !== 'bkNow') return;
+    e.target.disabled = true; e.target.textContent = 'Backing up…';
+    const r = await api('POST', '/api/backup/run').catch((err) => ({ ok: false, error: err.message }));
+    toast(r.ok ? 'Backup copied off-server' : `Backup failed: ${r.error}`, r.ok ? 'ok' : 'error'); drawBackups();
+  });
   const drawTokens = async () => {
     const t = await api('GET', '/api/tokens');
     $('#apps').innerHTML = t.apps.length ? '<b>Connected apps</b>' + t.apps.map((a) => `<div class="calrow"><span>🔗</span><div class="cinfo"><b>${esc(a.name || 'App')}</b><span class="muted">connected ${ago(a.created)}${a.last_used ? ` · last used ${ago(a.last_used)}` : ''}</span></div><button class="btn sm danger" data-app="${esc(a.client_id)}">Disconnect</button></div>`).join('') : 'No apps connected yet.';
@@ -923,7 +1215,7 @@ document.addEventListener('keydown', (e) => {
 // ------------------------------------------------------------------ boot
 async function boot(refreshOnly = false) {
   const me = await api('GET', '/api/me');
-  state.me = me.user; state.users = me.users; state.integrations = me.integrations; state.claude = me.claude; state.publicUrl = me.publicUrl;
+  state.me = me.user; state.users = me.users; state.integrations = me.integrations; state.claude = me.claude; state.publicUrl = me.publicUrl; state.security = me.security;
   if (refreshOnly) { renderSidebar(); return; }
   shell(); applyTheme();
   await Promise.all([loadNotes(), loadMeta()]);

@@ -431,3 +431,46 @@ body.auth { display: grid; place-items: center; min-height: 100vh; padding: 16px
 .csrc a span { color: var(--mute); margin-left: 6px; font-size: 12px; }
 .cfoot { font-size: 11px; text-align: center; margin: 6px 0 0; }
 @media (max-width: 760px) { .claude { padding: 10px 12px 8px; } }
+
+/* ---------- history ---------- */
+.modal.wide:has(.hist) { max-width: 1000px; }
+.hist { display: grid; grid-template-columns: 230px 1fr; gap: 14px; min-height: 50vh; }
+.hlist { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; max-height: 62vh; border-right: 1px solid var(--line); padding-right: 8px; }
+.hitem { text-align: left; background: none; border: 0; border-radius: 8px; padding: 7px 9px; cursor: pointer; display: flex; flex-direction: column; color: var(--fg); }
+.hitem span { font-size: 12px; color: var(--mute); }
+.hitem.on, .hitem:hover { background: var(--acc2); }
+.hview { min-width: 0; overflow-y: auto; max-height: 62vh; }
+.hbar { display: flex; align-items: center; gap: 10px; justify-content: space-between; position: sticky; top: 0; background: var(--panel); padding-bottom: 8px; }
+@media (max-width: 760px) { .hist { grid-template-columns: 1fr; } .hlist { max-height: 22vh; border-right: 0; border-bottom: 1px solid var(--line); } }
+
+.qr { width: 210px; margin: 6px auto; background: #fff; border-radius: 10px; } .qr svg { display: block; width: 100%; height: auto; }
+.key { font-size: 14px; letter-spacing: .05em; user-select: all; }
+pre.codes { font: 16px/1.8 var(--mono); background: var(--code); padding: 12px 18px; border-radius: 10px; columns: 2; user-select: all; }
+
+/* ---------- attachments ---------- */
+.md .media { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; } .md .mlabel { font-size: 13px; color: var(--mute); }
+.md audio { width: 100%; max-width: 420px; } .md video { max-width: 100%; border-radius: 8px; }
+.dropping { outline: 2px dashed var(--acc); outline-offset: 4px; border-radius: 8px; }
+.fileitem { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 3px 0; } .fileitem a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.rec { display: flex; flex-direction: column; align-items: center; gap: 12px; } .rtime { font: 600 34px var(--mono); }
+.rlevel { width: 100%; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; } .rlevel i { display: block; height: 100%; width: 0; background: var(--acc); transition: width .08s; }
+.rec textarea { width: 100%; }
+
+.checks { display: flex; flex-direction: column; gap: 8px; font-size: 14px; } .checks input[type=time] { padding: 2px 6px; } .checks select { padding: 2px 6px; }
+
+.unraid { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.urow { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+.ubar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; } .ubar i { display: block; height: 100%; background: var(--acc); }
+.udisks { display: flex; flex-wrap: wrap; gap: 4px; } .udisk { font-size: 12px; padding: 1px 7px; border-radius: 8px; background: var(--bg2); border: 1px solid var(--line); }
+.udisk small { color: var(--mute); } .udisk.hot { border-color: var(--warn); } .udisk.bad { border-color: var(--err); color: var(--err); }
+
+/* ---------- study chart ---------- */
+:root, [data-theme="light"] { --chart-1: #7c3aed; }
+[data-theme="dark"] { --chart-1: #9b7cf2; }
+.schart { margin: 8px 0 24px; } .schart figcaption { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.swrap { position: relative; } .schart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.sbar path { fill: var(--chart-1); } .sbar { outline: none; cursor: default; } .sbar.on path, .sbar:focus path { opacity: .75; }
+.sbar.on rect, .sbar:focus rect { fill: color-mix(in srgb, var(--fg) 6%, transparent); }
+.sgrid { stroke: var(--line); stroke-width: 1; } .saxis { fill: var(--mute); font-size: 11px; } .sval { fill: var(--fg); font-size: 11px; font-weight: 600; }
+.stip { position: absolute; top: -6px; background: var(--fg); color: var(--bg); font-size: 12px; padding: 3px 8px; border-radius: 6px; white-space: nowrap; pointer-events: none; }
+.stable { font-size: 13px; margin-top: 6px; border-collapse: collapse; } .stable td, .stable th { padding: 2px 12px 2px 0; text-align: left; }
