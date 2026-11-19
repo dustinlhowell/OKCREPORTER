@@ -1,0 +1,16 @@
+{
+  "name": "ledger",
+  "version": "1.0.0",
+  "description": "Self-hosted household budget: zero-based envelope budgeting, debt snowball, bills & cash-flow calendar, phone quick-add and a Claude app connector.",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "qrcode-generator": "^1.4.4"
+  }
+}

@@ -1,0 +1,13 @@
+services:
+  ledger:
+    build: .
+    container_name: ledger
+    restart: unless-stopped
+    ports:
+      - "8091:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: America/Chicago                     # your time zone – decides what "today" is
+      # PUBLIC_URL: https://ledger.example.com  # your https address (for the Claude app connector & links in notifications)
+      # BACKUP_PASSPHRASE: ""                   # + BACKUP_S3_* or BACKUP_COPY_DIR for off-server backups
