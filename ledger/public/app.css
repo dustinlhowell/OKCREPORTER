@@ -370,3 +370,5 @@ h3.sub { font-size: 14px; margin: 18px 0 6px; }
 ol.sc { padding-left: 22px; font-size: 14px; } ol.sc li { margin: 8px 0; line-height: 1.6; }
 .copy.inl { display: flex; gap: 6px; margin: 4px 0; max-width: 560px; } .copy.inl input { flex: 1; font-size: 12.5px; padding: 5px 8px; }
 details summary { cursor: pointer; color: var(--acc); }
+
+img.logo { background: none; padding: 0; display: block; } .authbox img.logo.big { width: 72px; height: 72px; border-radius: 0; }
