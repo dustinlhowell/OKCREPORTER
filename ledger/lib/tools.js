@@ -14,7 +14,7 @@ export function buildTools(d, user) {
   const itemLine = (month, itemId) => {
     const v = d.monthView(month);
     for (const g of v.groups) for (const it of g.items) if (it.id === itemId)
-      return g.kind === 'income' ? `${it.name}: ${$(it.spent)} received of ${$(it.planned)} planned` : `${it.name}: ${$(it.available)} left of ${$(it.planned + it.carry)}${it.available < 0 ? ' ⚠️ overspent' : ''}`;
+      return g.kind === 'income' ? `${it.name}: ${$(it.spent)} received of ${$(it.planned)} planned` : (it.available < 0 ? `${it.name}: ⚠️ ${$(-it.available)} over its ${$(it.planned + it.carry)} budget` : `${it.name}: ${$(it.available)} left of ${$(it.planned + it.carry)}`);
     return '';
   };
   return [
@@ -34,7 +34,7 @@ export function buildTools(d, user) {
         const item = a.category ? findItem(a.category, { income: kind === 'income' }) : (a.payee ? d.payeeItem(a.payee) : null);
         if (a.category && !item) throw new Error(`No category matches "${a.category}". Categories: ${d.itemsFlat().filter((i) => !i.archived).map((i) => i.name).join(', ')}`);
         const acct = a.account ? d.q('SELECT id FROM accounts WHERE lower(name) LIKE ? AND archived = 0').get(`%${String(a.account).toLowerCase()}%`) : null;
-        const t = d.saveTxn(user.id, { date: a.date || d.today(), kind, amount, payee: a.payee || '', note: a.note || '', account_id: acct?.id, lines: [{ item_id: item?.id ?? null, amount }], source: 'claude' });
+        const t = d.saveTxn(user.id, { date: a.date || d.today(), kind, amount, payee: a.payee || '', note: a.note || '', account_id: acct?.id, lines: [{ item_id: item?.id ?? null, amount }], source: a._source || 'claude' });
         const what = kind === 'income' ? (a.kind === 'refund' ? 'refund' : 'income') : 'expense';
         return `Logged ${what} ${$(amount)}${a.payee ? ` at ${a.payee}` : ''} on ${t.date}${item ? ` → ${item.name}` : ' → Needs category'}.${item ? ' ' + itemLine(t.date.slice(0, 7), item.id) : ''}`;
       },

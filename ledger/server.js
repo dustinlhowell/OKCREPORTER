@@ -1425,7 +1425,8 @@ When the user says they spent, paid, bought or received money, call log_transact
 Use budget_status to answer "how much is left / can I afford" questions, upcoming_bills for what's due, and debt_snowball for debt progress.
 Bank transactions arrive automatically; new_transactions lists what needs a category and categorize_transaction files them. subscriptions and spending_insights cover recurring charges and trends. Today is ${'${today}'} (${TZ}).`;
 function tokenUser(req, kinds) {
-  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  // "Bearer <token>"; a bare personal token is accepted too (a common slip when building a Shortcut).
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '') || (/^lgp_\S+$/.test(String(req.headers.authorization || '').trim()) && kinds.includes('pat') ? [null, String(req.headers.authorization).trim()] : null);
   if (!m) return null;
   const row = q('SELECT t.id, t.kind, t.client_id, t.expires, u.id AS uid, u.name, u.email, u.color FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.hash = ?').get(sha(m[1].trim()));
   if (!row || !kinds.includes(row.kind) || (row.expires && row.expires < Date.now())) return null;
@@ -1585,16 +1586,42 @@ route('GET', '/mcp', mcpNoStream, { public: true, raw: true });
 route('DELETE', '/mcp', mcpNoStream, { public: true, raw: true });
 
 // Siri / Shortcuts / scripts: POST /api/spend with a personal token. {"text":"42.50 Costco groceries"} or {"amount":42.5,"payee":"Costco","category":"Groceries"}
-route('POST', '/api/spend', ({ req, body }) => {
+// ?format=text answers with one plain sentence – success or the problem – for Shortcuts' Show Notification.
+route('POST', '/api/spend', ({ req, body, query }) => {
+  if (query.format !== 'text') return spend(req, body);
+  try { return spend(req, body).message; } catch (e) { return `⚠️ ${e.status === 500 || !e.status ? 'Ledger hit an error' : e.message}`; }
+}, { public: true });
+function spend(req, body) {
   const user = tokenUser(req, ['pat']);
-  if (!user) throw new HttpError(401, 'Missing or invalid token');
+  if (!user) throw new HttpError(401, 'Missing or invalid token – create a new one in Ledger → Settings → Phone');
   if (body.amount !== undefined) {
     const tool = buildTools(toolDeps, user).find((t) => t.name === 'log_transaction');
-    const err = validate(tool.inputSchema, body); if (err) bad(err);
-    return { ok: true, message: tool.run(body) };
+    const args = { ...body };
+    for (const k of Object.keys(args)) if (args[k] === '' || args[k] === null) delete args[k];
+    // Shortcut menus send the label they showed ("🛒 Groceries · $69 left"); keep just the name.
+    if (args.category) { args.category = String(args.category).split(' · ')[0].replace(/^[^\p{L}\p{N}]+/u, '').trim(); if (!args.category || /^not sure/i.test(args.category)) delete args.category; }
+    if (args.kind && !['expense', 'income', 'refund'].includes(String(args.kind).toLowerCase())) args.kind = /income|received|paid me/i.test(args.kind) ? 'income' : /refund|return/i.test(args.kind) ? 'refund' : 'expense';
+    else if (args.kind) args.kind = String(args.kind).toLowerCase();
+    const err = validate(tool.inputSchema, args); if (err) bad(err);
+    // Short enough for a phone notification: "✓ $18.40 Chick-fil-A → Restaurants · $38.11 left of $225.00"
+    const msg = tool.run({ ...args, _source: 'shortcut' }).replace(/^Logged (?:expense|income|refund) /, '✓ ').replace(/ at /, ' ').replace(` on ${today()}`, '')
+      .replace(/\. ([^.]+?): (.+)$/, (m, name, rest) => ` · ${rest}`).replace(/\.$/, '');
+    return { ok: true, message: msg };
   }
   const r = quickEntry(user, { ...body, source: 'shortcut' }, null);
   return { ok: true, message: r.message };
+}
+// The category menu for the phone Shortcut: most-used first, each with what's left this month.
+route('GET', '/api/spend/categories', ({ req, query }) => {
+  const user = tokenUser(req, ['pat']);
+  if (!user) throw new HttpError(401, 'Missing or invalid token');
+  const income = query.kind === 'income';
+  const v = monthView(B.isMonth(query.month) ? query.month : today().slice(0, 7));
+  const uses = new Map(q("SELECT l.item_id, COUNT(*) n FROM lines l JOIN txns t ON t.id = l.txn_id WHERE t.date >= ? AND l.item_id IS NOT NULL GROUP BY l.item_id").all(B.addDays(today(), -90)).map((r) => [r.item_id, r.n]));
+  const rows = v.groups.filter((g) => (g.kind === 'income') === income).flatMap((g) => g.items).map((i, k) => ({ i, k })).sort((a, b) => (uses.get(b.i.id) || 0) - (uses.get(a.i.id) || 0) || a.k - b.k);
+  const labels = rows.map(({ i }) => `${i.emoji ? i.emoji + ' ' : ''}${i.name}${income ? '' : ` · ${$(Math.abs(i.available), { cents: Math.abs(i.available) < 10000 })} ${i.available < 0 ? 'over' : 'left'}`}`);
+  labels.push('❓ Not sure – sort it later');
+  return query.format === 'text' ? labels.join('\n') : labels;
 }, { public: true });
 route('GET', '/api/spend/status', ({ req, query }) => {
   const user = tokenUser(req, ['pat']);

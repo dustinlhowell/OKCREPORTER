@@ -442,9 +442,25 @@ async function settingsView(main) {
       <p><b>1. Install the app:</b> open <code>${esc(base)}</code> on your phone → Share → <b>Add to Home Screen</b>. The big <b>＋</b> logs a purchase in seconds, even offline.</p>
       <p><b>2. Tell Claude:</b> add Ledger as a custom connector in the Claude app (claude.ai → Settings → Connectors → Add custom connector) with the URL <code>${esc(base)}/mcp</code>. Then say <i>“I spent $42 at Costco on groceries”</i> or <i>“how much is left for restaurants?”</i>.</p>
       ${tokens.apps.length ? `<ul class="list compact">${tokens.apps.map((a) => `<li><span class="grow">🔗 ${esc(a.name || 'App')} <span class="muted small">connected</span></span><button class="btn sm danger" data-app="${esc(a.client_id)}">Disconnect</button></li>`).join('')}</ul>` : ''}
-      <p><b>3. Siri / Back Tap / Action Button:</b> create a token, then build a Shortcut: <i>Dictate Text</i> → <i>Get Contents of URL</i> (POST <code>${esc(base)}/api/spend</code>, header <code>Authorization: Bearer &lt;token&gt;</code>, JSON body <code>text</code> = Dictated Text) → <i>Show Result</i>. Say “Hey Siri, log spending… 42 50 Costco groceries”.</p>
+      <h3 class="sub">3. “Log Spending” form on your iPhone (no browser)</h3>
+      <p class="small">A native pop-up form: <b>amount → category (with what's left) → where</b>, and Ledger confirms with a notification. Run it from your Home Screen, the Action Button, Back Tap or Siri. Build it once in the <b>Shortcuts</b> app (about 3 minutes):</p>
+      <div class="row wrap"><button class="btn primary" id="mktok">Create my phone token</button><span class="muted small">Copy it – it's shown only once.</span></div><div id="newtok"></div>
+      <ol class="sc">
+        <li>Shortcuts app → <b>＋</b> → name it <b>Log Spending</b>.</li>
+        <li><b>Ask for Input</b> – Input: <i>Number</i>, Prompt: <i>How much?</i> (turn on Allow Decimals). Then <b>Set Variable</b> → name it <b>Amount</b>.</li>
+        <li><b>Get Contents of URL</b> – URL: ${copyField(`${base}/api/spend/categories`)} Show More → Headers → add <code>Authorization</code> = <code>Bearer</code> + space + your token.</li>
+        <li><b>Choose from List</b> – List: <i>Contents of URL</i>, Prompt: <i>Which category?</i>. Then <b>Set Variable</b> → <b>Category</b>.</li>
+        <li><b>Ask for Input</b> – Input: <i>Text</i>, Prompt: <i>Where?</i> (you can leave it blank when you log). Then <b>Set Variable</b> → <b>Where</b>.</li>
+        <li><b>Get Contents of URL</b> – URL: ${copyField(`${base}/api/spend?format=text`)} Method: <b>POST</b>, same <code>Authorization</code> header, Request Body: <b>JSON</b> with three fields:
+          <code>amount</code> (Number) = <i>Amount</i>, <code>category</code> (Text) = <i>Category</i>, <code>payee</code> (Text) = <i>Where</i>.</li>
+        <li><b>Show Notification</b> – <i>Contents of URL</i>. You'll see e.g. <i>“✓ $18.40 Chick-fil-A → Restaurants · $38.11 left of $225.00”</i>.</li>
+      </ol>
+      <p class="small"><b>Make it one tap:</b> in the shortcut tap ⓘ → <b>Add to Home Screen</b>; or Settings → <b>Action Button</b> → Shortcut; or Settings → Accessibility → Touch → <b>Back Tap</b> → Double Tap; or add the Shortcuts widget to your Lock Screen. “Hey Siri, Log Spending” works too.</p>
+      <p class="muted small">Categories are listed most-used first. “Not sure – sort it later” puts it in New transactions (Ledger still guesses from the store name). With bank sync on, the bank's copy of the purchase is matched to what you logged – it's never counted twice. Want a second one for income? Duplicate it, add <code>?kind=income</code> to the categories URL and a <code>kind</code> = <code>income</code> field to the JSON.</p>
+      <details class="small"><summary>Android</summary><p>Use the free <b>HTTP Shortcuts</b> app: create a shortcut that POSTs JSON to ${copyField(`${base}/api/spend?format=text`)} with the same Authorization header and body <code>{"amount": "{amount}", "category": "{category}", "payee": "{where}"}</code>, using a Number variable, a Select variable (your category names) and a Text variable; set the response to show as a toast.</p></details>
+      <h3 class="sub">Tokens</h3>
       <ul class="list compact">${tokens.tokens.map((t) => `<li><span class="grow">🔑 ${esc(t.name)} <span class="muted small">${t.last_used ? 'last used ' + new Date(t.last_used).toLocaleDateString() : 'never used'}</span></span><button class="btn sm danger" data-tok="${t.id}">Revoke</button></li>`).join('')}</ul>
-      <button class="btn" id="mktok">Create token</button><div id="newtok"></div></section>
+      </section>
 
     <section class="card"><h2>📅 Calendar feed</h2><p>Bills, paydays and debt due dates as a calendar you can subscribe to – in iPhone/Google/Outlook calendar, or in <b>Nexus</b> (Settings → Calendars → Subscribe to ICS URL).</p>
       <div class="copy"><input readonly value="${esc(icsUrl)}"><button class="btn sm" data-copy="${esc(icsUrl)}">Copy</button></div><button class="linkbtn small" id="rot">Make a new private link (old one stops working)</button></section>
@@ -483,7 +499,7 @@ async function settingsView(main) {
   $('#test').onclick = async () => { try { $('#fn').requestSubmit(); const r = await api('POST', '/api/notify/test'); toast(r.results.map((x) => `${x.channel}: ${x.ok ? 'sent ✓' : x.error}`).join(' · ')); } catch (e) { toast(e.message, 'err'); } };
   form('#fu', async (b, f) => { await api('POST', '/api/users', b); toast(`Added ${b.name}. They can sign in with that email and password.`); f.reset(); route(); });
   form('#fme', async (b) => { LS.set('ledger.theme', b.theme); applyTheme(); const body = { name: b.name, color: b.color }; if (b.password) Object.assign(body, { password: b.password, current: b.current }); await api('PATCH', '/api/users/me', body); toast('Saved'); });
-  $('#mktok').onclick = async () => { const r = await api('POST', '/api/tokens', { name: 'iPhone Shortcut' }); $('#newtok').innerHTML = `<p class="callout">Copy this now – it won't be shown again:</p><div class="copy"><input readonly value="${r.token}"><button class="btn sm" data-copy="${r.token}">Copy</button></div>`; bindCopy(); };
+  $('#mktok').onclick = async () => { const r = await api('POST', '/api/tokens', { name: 'iPhone Shortcut' }); $('#newtok').innerHTML = `<p class="callout">Your token – copy it now, it won't be shown again. In the Shortcut the header value is <code>Bearer</code>, a space, then this:</p><div class="copy"><input readonly value="${r.token}"><button class="btn sm" data-copy="${r.token}">Copy</button></div>`; bindCopy(); };
   $$('[data-tok]').forEach((b) => (b.onclick = async () => { await api('DELETE', `/api/tokens/${b.dataset.tok}`); route(); }));
   $$('[data-app]').forEach((b) => (b.onclick = async () => { await api('DELETE', `/api/apps/${encodeURIComponent(b.dataset.app)}`); route(); }));
   $('#rot').onclick = async () => { if (await confirmBox('New calendar link', 'Calendars subscribed to the old link will stop updating. Continue?', 'Make new link')) { await api('PATCH', '/api/users/me', { rotateIcs: true }); route(); } };
@@ -493,6 +509,7 @@ async function settingsView(main) {
   $('#tfa').onclick = () => (me.security.totp ? tfaOff() : tfaOn(me.user.email));
   bindCopy();
 }
+const copyField = (v) => `<span class="copy inl"><input readonly value="${esc(v)}"><button class="btn sm" data-copy="${esc(v)}">Copy</button></span>`;
 const bindCopy = () => $$('[data-copy]').forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast('Copied'); } catch { b.previousElementSibling?.select(); } }));
 async function tfaOn() {
   const r = await api('POST', '/api/2fa/setup');
