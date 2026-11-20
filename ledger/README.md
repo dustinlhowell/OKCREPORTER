@@ -74,12 +74,27 @@ Bank charges, subscriptions and insights are also available to the Claude app: *
    - *“What bills are due this week?”*
    - *“Move $40 from fun money to groceries.”*
    - *“How's my debt snowball?”*
-3. **Siri / Action Button (no AI, instant):**
-   1. In **Settings → Phone & Claude app**, tap **Create token**.
-   2. Build a Shortcut: *Dictate Text* → *Get Contents of URL*. Set it to `POST https://YOUR-HOST/api/spend`, with the header `Authorization: Bearer <token>` and a JSON body field `text` set to the dictated text. Finish with *Show Result*.
-   3. Now *“Hey Siri, log spending… twelve fifty Starbucks coffee”* answers back with what's left.
+3. **“Log Spending” form (native iPhone Shortcut, no browser):** this pop-up form asks *amount → category (each showing what's left) → where*. Ledger replies with a notification such as *“✓ $18.40 Chick-fil-A → Restaurants · $38.11 left of $225.00”*. You can run it from your Home Screen, the Action Button, Back Tap, a Lock Screen widget, or by saying *“Hey Siri, Log Spending”*.
 
-   To check a balance, use `GET /api/spend/status?category=groceries` with the same token.
+   **Settings → Phone & Claude app** has the full build steps with your real URLs and copy buttons. In short:
+   1. Create a token.
+   2. In the Shortcuts app, add these actions:
+      - *Ask for Input* (Number) → *Set Variable* Amount
+      - *Get Contents of URL* `GET /api/spend/categories` → *Choose from List* → *Set Variable* Category
+      - *Ask for Input* (Text, “Where?”) → *Set Variable* Where
+      - *Get Contents of URL* `POST /api/spend?format=text` with a JSON body of `amount`, `category` and `payee`
+      - *Show Notification*
+
+      Both requests need the header `Authorization: Bearer <token>`.
+
+   - The category list comes from Ledger each time, so new categories show up automatically. The most-used ones come first.
+   - *“Not sure – sort it later”* sends the purchase to the New transactions tray.
+   - With bank sync on, the bank's copy of the purchase is matched to what you logged, so nothing is counted twice.
+   - Your phone has to be able to reach Ledger, so away from home use your Tailscale or Cloudflare address.
+
+   Other ways to log:
+   - **Talk instead of tapping:** POST `{"text": "42.50 costco groceries"}` to `/api/spend`, which works well with *Dictate Text*.
+   - **Check a balance:** `GET /api/spend/status?category=groceries`.
 
 > **Cloudflare Access users:** add a Bypass policy for `/mcp`, `/.well-known/*`, `/oauth/*`, `/api/spend*` and `/ics/*`, the same as for Nexus. Those paths are still protected by Ledger's own tokens.
 
