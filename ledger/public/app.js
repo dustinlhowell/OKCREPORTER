@@ -24,7 +24,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 async function showAuth() {
   const { setup } = await fetch('/api/status').then((r) => r.json());
   document.body.className = 'auth';
-  document.body.innerHTML = `<div class="authbox"><div class="logo big">$</div><h1>Ledger</h1>
+  document.body.innerHTML = `<div class="authbox"><img class="logo big" src="/icon.svg" alt=""><h1>Ledger</h1>
     <p class="muted">${setup ? 'Create your household budget. Your partner can be added from Settings.' : 'Sign in to your household budget.'}</p>
     <form>${setup ? '<input name="name" placeholder="Your name" required autocomplete="name"><input name="household" placeholder="Budget name (e.g. The Howell budget)">' : ''}
       <input name="email" type="email" placeholder="Email" required autocomplete="username">
@@ -49,7 +49,7 @@ on('signedout', () => showAuth());
 function shell() {
   document.body.className = '';
   document.body.innerHTML = `<div id="app">
-    <aside id="side"><div class="brand"><span class="logo">$</span><span>${esc(state.settings.household)}</span></div>
+    <aside id="side"><div class="brand"><img class="logo" src="/icon.svg" alt=""><span>${esc(state.settings.household)}</span></div>
       <button class="btn primary addbtn" id="sideAdd">＋ Add transaction</button>
       <nav id="nav">${NAV.map(([k, ic, l]) => `<a href="#/${k}" data-k="${k}"><span class="ic">${ic}</span>${l}<span class="cnt" data-cnt="${k}"></span></a>`).join('')}</nav>
       <div class="sp"></div>
