@@ -20,6 +20,9 @@ It comes set up for **November 2026 – December 2027**: the last two months of 
 | **Quick add from your phone.** Use the home-screen app, a Siri shortcut, or the Claude app. Entries you make offline are saved and sync later. Ledger remembers which category each payee belongs in. | Copilot, Goodbudget |
 | **Needs-category inbox.** Anything logged without a category waits on Home until you file it. | Copilot, Monarch |
 | **Split transactions, refunds, transfers, multiple accounts, reconciling** against your bank balance, and a **net worth** total. | YNAB, Actual |
+| **Automatic bank sync** through SimpleFIN Bridge. New transactions land in a **New transactions** tray where you tap the suggested category or pick one. Ledger cleans up bank names (`SQ *CHIPOTLE 1234 OKLAHOMA CITY OK` becomes “Chipotle”) and learns from your choices. Anything you already logged on your phone is matched, not duplicated. Card payments and transfers between your accounts are paired as transfers. Bills and paydays are marked paid automatically. | EveryDollar, Monarch |
+| **Subscriptions.** Recurring charges are found in your bank history. You see monthly and yearly totals, and get price-increase alerts, renewal reminders, and links to each service's cancel page. If a service you marked cancelled charges you again, you get a warning. | Rocket Money |
+| **Bank alerts.** Large or unusual charges, possible double charges, low balances, and a weekly *“your week in money”* summary. **Net worth** is charted over time. | Rocket Money, Copilot |
 | **Bank CSV import.** Map the columns once; duplicates are skipped, known payees are categorized automatically, and bills are matched and marked paid. | Actual, Monarch |
 | **Reports.** Income vs spending, where the money went, planned vs actual, top categories and top payees. | Monarch |
 | **Household.** You and your partner each have a login and see the same budget. Changes show up live on the other phone, and every transaction records who entered it. | Goodbudget, Monarch |
@@ -33,6 +36,34 @@ It comes set up for **November 2026 – December 2027**: the last two months of 
 - **Overspent?** Tap the category → **Move money** from a category that has money left.
 - **Paid a bill?** Tap **Paid** next to it on Home or the calendar. If you'd rather log it with **＋**, choose the bill's category and Ledger links the payment to the bill automatically.
 - **Debt payment?** Go to Debt snowball → **Log payment**, or log it under that debt's line in the Debt group.
+
+## Bank sync (First Fidelity and other banks)
+
+Ledger connects to banks through **[SimpleFIN Bridge](https://bridge.simplefin.org)**, a small paid service (about $15 a year, check their site). You sign in to your bank on SimpleFIN's site, never in Ledger. Ledger only gets **read-only** access to balances and transactions; it can't move money.
+
+1. At bridge.simplefin.org, create an account and connect your bank. Search for it there first to confirm it's supported.
+2. Under **Apps → New connection**, copy the **setup token**. It's a one-time code.
+3. In Ledger, go to **Settings → Bank sync**, paste the token, choose how far back to import, and click **Connect & import**.
+   - Going back about 3 months helps Ledger find your subscriptions.
+   - Anything before your budget's first month is kept as history only and doesn't need reviewing.
+
+**After that:**
+- Ledger syncs every 6 hours (set `BANK_SYNC_HOURS` to change this) and whenever you tap **↻ Sync**.
+- Banks usually post purchases within 1–2 days. Pending transactions are skipped until they post.
+- **New transactions** shows everything that needs a category. Tap the suggestion, or pick a category.
+  - **✎** renames a payee. Ledger uses the new name from then on.
+  - **✂︎** splits a transaction or edits it.
+  - **🗑** ignores it, and it won't be imported again.
+- Turn on **Auto-file** to skip the tray for stores you've already categorized twice.
+- **Accounts:** each bank account is linked to a Ledger account; change the mapping in Settings. A newly linked account starts at the bank's balance. The Accounts page shows whether each one still matches the bank.
+- **Credit card debts:** in the Debt snowball, edit a card and pick its **Linked account**. Its balance then comes straight from the bank, and payments you transfer to it count toward the snowball.
+
+**Security:**
+- The SimpleFIN access key is stored encrypted. The key that decrypts it is `data/secret.key`, which is not inside the database or the off-server backups.
+- If you restore Ledger on a new server without that file, reconnect bank sync with a new setup token.
+- To revoke access, click **Disconnect** in Ledger and also delete the Ledger connection on bridge.simplefin.org.
+
+Bank charges, subscriptions and insights are also available to the Claude app: *“what new transactions do I need to categorize?”*, *“put the Best Buy one in electronics”*, *“approve all the suggestions”*, *“what subscriptions am I paying for?”*.
 
 ## Phone setup
 
@@ -103,6 +134,7 @@ npm test                          # unit tests for the budget math, snowball, re
 | `BACKUP_COPY_DIR` / `BACKUP_REMOTE_KEEP` | — / `30` | Also copy encrypted backups to this folder; how many off-server copies to keep |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | — / `587` | Email notifications |
 | `PUSHOVER_TOKEN` | — | Pushover notifications |
+| `BANK_SYNC_HOURS` | `6` | How often to pull new bank transactions from SimpleFIN |
 
 **ntfy** needs no server setup: each person pastes their topic URL in **Settings → Notifications**.
 
@@ -121,6 +153,8 @@ server.js        HTTP server, REST API, auth (scrypt, sessions, TOTP), SSE live 
 lib/budget.js    Pure logic shared with the browser: envelope math, debt snowball, recurrence, quick-entry parser, CSV
 lib/db.js        SQLite schema (built into Node: WAL, foreign keys)
 lib/tools.js     Claude connector tools
+lib/simplefin.js SimpleFIN Bridge client, bank-description cleanup, encryption of the access key
+lib/insights.js  Recurring-charge / subscription detection, double and unusual charge checks
 public/          Vanilla-JS PWA: app.js (shell, home, transactions, quick add, settings), budgetview.js,
                  calendar.js, debts.js, bills.js, reports.js, charts.js (SVG)
 ```

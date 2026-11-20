@@ -30,7 +30,7 @@ export async function budgetView(main, [m]) {
       <div><span class="lbl">Spent</span><b>${money0(sm.spent)}</b>${bar(sm.planned + sm.carry ? sm.spent / (sm.planned + sm.carry) * 100 : 0, sm.spent > sm.planned + sm.carry ? 'over' : '')}</div>
       <div><span class="lbl">Remaining</span><b class="${sm.available < 0 ? 'neg' : ''}">${money0(sm.available)}</b><span class="sub ${sm.overspent ? 'neg' : ''}">${sm.overspent ? `${money0(sm.overspent)} overspent` : '&nbsp;'}</span></div>
     </div>
-    ${v.uncategorized.count ? `<a class="callout warn" href="#/txns">🗂️ ${v.uncategorized.count} transaction${v.uncategorized.count > 1 ? 's' : ''} this month (${money(v.uncategorized.amount)}) need a category – they aren't counted in any envelope yet.</a>` : ''}
+    ${v.uncategorized.count ? `<a class="callout warn" href="#/inbox">🗂️ ${v.uncategorized.count} transaction${v.uncategorized.count > 1 ? 's' : ''} this month (${money(v.uncategorized.amount)}) need a category – they aren't counted in any envelope yet.</a>` : ''}
     ${sm.planned === 0 && sm.incomePlanned === 0 ? `<div class="callout"><b>${monthName(month)} is empty.</b> Start by entering your expected income, then give every dollar a job. ${month > s.start_month ? '<button class="btn sm" id="copyLast">Copy last month’s plan</button>' : ''}</div>` : ''}
     <div class="colpick seg"><button data-c="planned">Planned</button><button data-c="spent">Spent</button><button data-c="available">Remaining</button></div>
     <div class="groups">${v.groups.map((g) => groupCard(g, month)).join('')}</div>

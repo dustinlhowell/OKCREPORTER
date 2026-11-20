@@ -4,10 +4,11 @@ import { calendarView } from './calendar.js';
 import { debtsView } from './debts.js';
 import { billsView, payBill } from './bills.js';
 import { reportsView } from './reports.js';
+import { inboxView, subsView, bankSettings, inboxCard, insightsCard, netWorthChart } from './inbox.js';
 
 const NAV = [
-  ['home', '🏠', 'Home'], ['budget', '📊', 'Budget'], ['year', '🗓️', 'Year plan'], ['txns', '🧾', 'Transactions'], ['calendar', '📅', 'Calendar'],
-  ['bills', '🔁', 'Bills & income'], ['debts', '⛓️', 'Debt snowball'], ['reports', '📈', 'Reports'], ['accounts', '🏦', 'Accounts'], ['settings', '⚙️', 'Settings'],
+  ['home', '🏠', 'Home'], ['budget', '📊', 'Budget'], ['year', '🗓️', 'Year plan'], ['inbox', '📥', 'New transactions'], ['txns', '🧾', 'Transactions'], ['calendar', '📅', 'Calendar'],
+  ['bills', '🔁', 'Bills & income'], ['subs', '🔔', 'Subscriptions'], ['debts', '⛓️', 'Debt snowball'], ['reports', '📈', 'Reports'], ['accounts', '🏦', 'Accounts'], ['settings', '⚙️', 'Settings'],
 ];
 let current = null, cleanup = null, gen = 0;
 
@@ -58,7 +59,7 @@ function shell() {
     <nav id="tabs">
       <a href="#/home" data-k="home"><span>🏠</span>Home</a><a href="#/budget" data-k="budget"><span>📊</span>Budget</a>
       <button id="fab" aria-label="Add transaction">＋</button>
-      <a href="#/calendar" data-k="calendar"><span>📅</span>Calendar</a><a href="#/more" data-k="more"><span>☰</span>More</a>
+      <a href="#/calendar" data-k="calendar"><span>📅</span>Calendar</a><a href="#/more" data-k="more"><span>☰</span>More<i class="tbadge" data-cnt="inbox"></i></a>
     </nav>
     <div id="toasts"></div></div>`;
   $('#sideAdd').onclick = () => quickAdd();
@@ -80,7 +81,7 @@ async function route() {
   $$('#nav a, #tabs a').forEach((a) => a.classList.toggle('active', a.dataset.k === view || (a.dataset.k === 'more' && !['home', 'budget', 'calendar'].includes(view))));
   const main = $('#main');
   main.scrollTop = 0; window.scrollTo(0, 0);
-  const views = { home, budget: budgetView, year: yearView, txns: txnsView, calendar: calendarView, bills: billsView, debts: debtsView, reports: reportsView, accounts: accountsView, settings: settingsView, more: moreView };
+  const views = { home, budget: budgetView, year: yearView, txns: txnsView, calendar: calendarView, bills: billsView, debts: debtsView, reports: reportsView, accounts: accountsView, settings: settingsView, more: moreView, inbox: inboxView, subs: subsView };
   try { cleanup = (await (views[view] || home)(main, rest)) || null; }
   catch (e) { if (my !== gen) return; if (e.message !== 'Signed out') { console.error(e); main.innerHTML = `<div class="page"><p class="err">Couldn't load: ${esc(e.message)}</p></div>`; } }
   updateBadges();
@@ -90,8 +91,8 @@ on('refresh', () => { if (!$('.overlay') || current === 'home') route(); updateB
 
 async function updateBadges() {
   try {
-    const v = await api('GET', '/api/txns?uncategorized=1&limit=99');
-    $$('[data-cnt="txns"]').forEach((e) => (e.textContent = v.length ? v.length : ''));
+    const { count } = await api('GET', '/api/inbox/count');
+    $$('[data-cnt="inbox"]').forEach((e) => (e.textContent = count ? count : ''));
   } catch {}
 }
 
@@ -103,7 +104,7 @@ function moreView(main) {
 // ------------------------------------------------------------------ home dashboard
 async function home(main) {
   const m = clampMonth(curMonth());
-  const [v, up, cf, debts, recent, unc] = await Promise.all([api('GET', `/api/budget/${m}`), api('GET', '/api/upcoming?days=14'), api('GET', '/api/cashflow'), api('GET', '/api/debts'), api('GET', '/api/txns?limit=8'), api('GET', '/api/txns?uncategorized=1&limit=20')]);
+  const [v, up, cf, debts, recent, tray, ins] = await Promise.all([api('GET', `/api/budget/${m}`), api('GET', '/api/upcoming?days=14'), api('GET', '/api/cashflow'), api('GET', '/api/debts'), api('GET', '/api/txns?limit=8'), inboxCard(), insightsCard()]);
   const s = v.summary, t = state.today;
   const dayOfMonth = +t.slice(8), dim = B.daysIn(+m.slice(0, 4), +m.slice(5));
   const pace = m === curMonth() ? dayOfMonth / dim : 1;
@@ -113,6 +114,7 @@ async function home(main) {
   const ltb = s.leftToBudget;
   main.innerHTML = `<div class="page home">
     <header class="phead"><div><h1>${greeting()}, ${esc(state.me.name.split(' ')[0])}</h1><p class="muted">${fmtDate(t, { weekday: 'long', month: 'long', day: 'numeric' })} · ${monthName(m)}</p></div></header>
+    ${tray.html}
     ${state.today < state.settings.start_month + '-01' ? `<div class="callout">Your budget starts in <b>${monthName(state.settings.start_month)}</b>. Showing that month.</div>` : ''}
     <div class="tiles">
       <a class="tile ${ltb === 0 ? 'good' : ltb < 0 ? 'badt' : 'warnt'}" href="#/budget/${m}"><span class="lbl">Left to budget</span><b>${money(ltb)}</b><span class="sub">${ltb === 0 ? '✓ Every dollar has a job' : ltb > 0 ? 'Give these dollars a job' : 'You budgeted more than you make'}</span></a>
@@ -126,16 +128,12 @@ async function home(main) {
       <section class="card"><h2>Envelopes to watch <a class="more" href="#/budget/${m}">Budget ›</a></h2>
         ${watch.length ? `<ul class="list">${watch.map((i) => `<li><span class="ic">${esc(i.emoji || '•')}</span><span class="grow">${esc(i.name)}${bar(i.planned + i.carry > 0 ? i.spent / (i.planned + i.carry) * 100 : 100, i.available < 0 ? 'over' : 'low')}</span><b class="${i.available < 0 ? 'neg' : 'warn'}">${money(i.available)}</b></li>`).join('')}</ul>` : '<p class="muted">Nothing is low or overspent. 👍</p>'}</section>
     </div>
-    ${unc.length ? `<section class="card"><h2>🗂️ Needs a category <span class="badge">${unc.length}</span></h2><ul class="list">${unc.map((x) => `<li data-id="${x.id}"><span class="grow"><b>${esc(x.payee || '(no payee)')}</b> <span class="muted small">${fmtDate(x.date)}</span></span><b class="${x.kind === 'income' ? 'pos' : ''}">${x.kind === 'income' ? '+' : ''}${money(x.amount)}</b><select class="cat">${itemOptions('', { none: 'Pick…' })}</select></li>`).join('')}</ul></section>` : ''}
+    ${ins}
     <section class="card"><h2>Recent <a class="more" href="#/txns">All transactions ›</a></h2>${recent.length ? `<ul class="list txlist">${recent.map(txRow).join('')}</ul>` : '<p class="muted">No transactions yet. Tap <b>＋</b> to log one – it takes 3 seconds.</p>'}</section>
   </div>`;
   bindTxRows(main);
   bindUpRows(main);
-  $$('.cat', main).forEach((sel) => (sel.onchange = async () => {
-    const id = +sel.closest('li').dataset.id;
-    await api('POST', '/api/txns/bulk', { ids: [id], action: 'categorize', item_id: +sel.value });
-    sel.closest('li').remove(); toast('Categorized'); updateBadges();
-  }));
+  if ($('.intray', main)) tray.bind($('.intray', main));
 }
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 export const upRow = (b) => `<li class="up ${b.status.replace(' ', '')}" data-type="${b.type}" data-id="${b.id}" data-date="${b.date}"><span class="date"><b>${fmtDate(b.date, { day: 'numeric' })}</b>${weekday(b.date)}</span>
@@ -386,7 +384,8 @@ function importCsv() {
 
 // ------------------------------------------------------------------ accounts
 async function accountsView(main) {
-  const [accts, debts] = await Promise.all([api('GET', '/api/accounts?all=1'), api('GET', '/api/debts')]);
+  const [accts, debts, bank] = await Promise.all([api('GET', '/api/accounts?all=1'), api('GET', '/api/debts'), api('GET', '/api/bank')]);
+  const bankOf = (id) => bank.accounts.find((b) => b.enabled && b.account_id === id);
   state.accounts = accts.filter((a) => !a.archived);
   const assets = accts.filter((a) => !a.archived && a.kind !== 'credit').reduce((s, a) => s + a.balance, 0);
   const cards = accts.filter((a) => !a.archived && a.kind === 'credit').reduce((s, a) => s + a.balance, 0);
@@ -394,9 +393,10 @@ async function accountsView(main) {
   main.innerHTML = `<div class="page"><header class="phead"><h1>Accounts</h1><span class="sp"></span><button class="btn primary" id="add">＋ Add account</button></header>
     <div class="tiles"><div class="tile"><span class="lbl">Cash & savings</span><b>${money0(assets)}</b></div><div class="tile"><span class="lbl">Credit cards</span><b class="${cards < 0 ? 'neg' : ''}">${money0(cards)}</b></div>
       <div class="tile"><span class="lbl">Snowball debts</span><b class="neg">${money0(-debts.total)}</b></div><div class="tile"><span class="lbl">Net worth (tracked)</span><b>${money0(assets + cards - debts.total)}</b></div></div>
-    <section class="card"><ul class="list">${accts.map((a) => `<li data-id="${a.id}" class="${a.archived ? 'archived' : ''}"><span class="grow"><b>${esc(a.name)}</b><br><span class="muted small">${kinds[a.kind]}${a.uncleared ? ` · ${a.uncleared} uncleared` : ''}${a.archived ? ' · archived' : ''}</span></span><b class="${a.balance < 0 ? 'neg' : ''}">${money(a.balance)}</b>
+    <section class="card"><ul class="list">${accts.map((a) => `<li data-id="${a.id}" class="${a.archived ? 'archived' : ''}"><span class="grow"><b>${esc(a.name)}</b><br><span class="muted small">${kinds[a.kind]}${bankOf(a.id) ? ` · 🔗 ${esc(bankOf(a.id).org || 'bank')}${bankOf(a.id).balance != null && bankOf(a.id).balance !== a.balance ? ` · <span class="warn">bank says ${money(bankOf(a.id).balance)}</span>` : ' · matches bank ✓'}` : ''}${a.uncleared ? ` · ${a.uncleared} uncleared` : ''}${a.archived ? ' · archived' : ''}</span></span><b class="${a.balance < 0 ? 'neg' : ''}">${money(a.balance)}</b>
       <button class="btn sm rec">Reconcile</button><button class="btn sm ed">Edit</button></li>`).join('')}</ul></section>
-    <p class="muted small">Balances = starting balance + every transaction on the account. <b>Reconcile</b> when you check your bank: enter the balance it shows and Ledger adjusts to match and marks everything cleared.</p></div>`;
+    <section class="card"><h2>📈 Net worth over time</h2><div id="nw"></div><p class="muted small">Cash and savings, minus credit cards and snowball debts, at the end of each month.</p></section>
+    <p class="muted small">Balances = starting balance + every transaction on the account. Bank-linked accounts are checked against the bank's balance after every sync. <b>Reconcile</b> when you check your bank: enter the balance it shows and Ledger adjusts to match and marks everything cleared.</p></div>`;
   const edit = (a = {}) => modal(a.id ? 'Edit account' : 'Add account', `<form><label>Name<input name="name" value="${esc(a.name || '')}" required autofocus></label>
     <label>Type<select name="kind">${Object.entries(kinds).map(([k, l]) => `<option value="${k}" ${a.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     <label>Starting balance<input name="start_balance" inputmode="decimal" value="${toInput(a.start_balance || 0)}" placeholder="0.00"><small class="muted">For credit cards enter what you owe as a negative number.</small></label>
@@ -407,6 +407,7 @@ async function accountsView(main) {
       await api(a.id ? 'PATCH' : 'POST', a.id ? `/api/accounts/${a.id}` : '/api/accounts', b); close(); await loadLayout(); route(); };
     if (a.id) $('#del', m).onclick = async () => { const r = await api('DELETE', `/api/accounts/${a.id}`); close(); toast(r.archived ? 'Archived (it has transactions)' : 'Deleted'); await loadLayout(); route(); };
   });
+  netWorthChart($('#nw'));
   $('#add').onclick = () => edit();
   $$('li[data-id]', main).forEach((li) => {
     const a = accts.find((x) => x.id === +li.dataset.id);
@@ -429,9 +430,13 @@ async function settingsView(main) {
       <label>Week starts on<select name="week_start"><option value="0">Sunday</option><option value="1" ${s.week_start ? 'selected' : ''}>Monday</option></select></label>
       <label>First month<select name="start_month">${monthsOpt(s.start_month)}</select></label>
       <label>Last month<select name="end_month">${monthsOpt(s.end_month)}</select></label>
+      <label>Alert on a single charge over<input name="large_charge" inputmode="decimal" value="${toInput(s.large_charge)}" placeholder="500"></label>
+      <label>Alert when a bank balance drops below<input name="low_balance" inputmode="decimal" value="${toInput(s.low_balance)}" placeholder="100"></label>
       <label>“Running low” alert at<select name="low_pct">${[75, 80, 85, 90, 95].map((v) => `<option value="${v}" ${s.low_pct === v ? 'selected' : ''}>${v}% spent</option>`).join('')}</select></label>
       <div class="row end"><button class="btn primary">Save</button></div></form>
       <p class="muted small">Months outside this range are hidden. Extend the last month whenever you're ready for the next year – everything carries over.</p></section>
+
+    <section class="card" id="banksec"><h2>🏦 Bank sync</h2><p class="muted">Loading…</p></section>
 
     <section class="card"><h2>📱 Phone & Claude app</h2>
       <p><b>1. Install the app:</b> open <code>${esc(base)}</code> on your phone → Share → <b>Add to Home Screen</b>. The big <b>＋</b> logs a purchase in seconds, even offline.</p>
@@ -451,6 +456,8 @@ async function settingsView(main) {
       ${notify.smtp ? `<label>Email<input name="email" type="email" value="${esc(n.email || '')}"></label>` : ''}
       <label class="check"><input type="checkbox" name="digest" ${p.digest.on ? 'checked' : ''}> Daily bill reminder at <input name="time" type="time" value="${esc(p.digest.time)}" style="width:auto"></label>
       <label class="check"><input type="checkbox" name="alerts" ${p.alerts ? 'checked' : ''}> Alert when a category runs low or goes over</label>
+      <label class="check"><input type="checkbox" name="bank" ${p.bank ? 'checked' : ''}> Bank alerts: large or unusual charges, double charges, price increases, low balance</label>
+      <label class="check"><input type="checkbox" name="insights" ${p.insights ? 'checked' : ''}> Weekly spending insights (Sunday evening)</label>
       <label class="check"><input type="checkbox" name="planReminder" ${p.planReminder ? 'checked' : ''}> Remind me to plan next month (around the 25th)</label>
       <div class="row end"><button type="button" class="btn" id="test">Send test</button><button class="btn primary">Save</button></div></form>
       <p class="muted small">ntfy is a free push-notification app – install it, subscribe to a hard-to-guess topic name, and paste that topic's address here.</p></section>
@@ -470,8 +477,9 @@ async function settingsView(main) {
       <div class="row wrap"><button class="btn" id="bk">Back up now</button><a class="btn" href="/api/export/csv" download>Transactions (CSV)</a><a class="btn" href="/api/export" download>Everything (JSON)</a><button class="btn" id="act">Activity log</button></div></section>
     <p class="center"><button class="btn danger" id="out">Sign out</button></p></div>`;
   const form = (id, fn) => { $(id).onsubmit = async (e) => { e.preventDefault(); try { await fn(Object.fromEntries(new FormData(e.target)), e.target); } catch (err) { toast(err.message, 'err'); } }; };
-  form('#fs', async (b) => { state.settings = await api('PUT', '/api/settings', { ...b, low_pct: +b.low_pct }); toast('Saved'); shell(); route(); });
-  form('#fn', async (b, f) => { await api('PUT', '/api/notify', { notify: { ntfy: b.ntfy, ntfyToken: b.ntfyToken, pushover: b.pushover, email: b.email }, digest: { on: f.digest.checked, time: b.time }, alerts: f.alerts.checked, planReminder: f.planReminder.checked }); toast('Saved'); });
+  form('#fs', async (b) => { state.settings = await api('PUT', '/api/settings', { ...b, low_pct: +b.low_pct, large_charge: fromInput(b.large_charge), low_balance: fromInput(b.low_balance) }); toast('Saved'); shell(); route(); });
+  bankSettings($('#banksec'));
+  form('#fn', async (b, f) => { await api('PUT', '/api/notify', { notify: { ntfy: b.ntfy, ntfyToken: b.ntfyToken, pushover: b.pushover, email: b.email }, digest: { on: f.digest.checked, time: b.time }, alerts: f.alerts.checked, planReminder: f.planReminder.checked, bank: f.bank.checked, insights: f.insights.checked }); toast('Saved'); });
   $('#test').onclick = async () => { try { $('#fn').requestSubmit(); const r = await api('POST', '/api/notify/test'); toast(r.results.map((x) => `${x.channel}: ${x.ok ? 'sent ✓' : x.error}`).join(' · ')); } catch (e) { toast(e.message, 'err'); } };
   form('#fu', async (b, f) => { await api('POST', '/api/users', b); toast(`Added ${b.name}. They can sign in with that email and password.`); f.reset(); route(); });
   form('#fme', async (b) => { LS.set('ledger.theme', b.theme); applyTheme(); const body = { name: b.name, color: b.color }; if (b.password) Object.assign(body, { password: b.password, current: b.current }); await api('PATCH', '/api/users/me', body); toast('Saved'); });

@@ -41,7 +41,8 @@ export function billEditor(r = null) {
     <label class="f-tr">To account<select name="to_account_id">${accountOptions(d.to_account_id, { blank: true })}</select></label>
     <label>Ends (optional)<input name="end" type="date" value="${d.rule.end || ''}"></label>
     <label>Remind me<select name="remind_days">${[0, 1, 2, 3, 5, 7].map((n) => `<option value="${n}" ${+d.remind_days === n ? 'selected' : ''}>${n ? `${n} day${n > 1 ? 's' : ''} before` : 'on the day'}</option>`).join('')}</select></label>
-    <label class="check full"><input type="checkbox" name="autopay" ${d.autopay ? 'checked' : ''}> <span><b>Autopay</b> – record it automatically on the date (otherwise tap “Paid” when you pay it)</span></label>
+    <label class="check full"><input type="checkbox" name="is_sub" ${d.is_sub ? 'checked' : ''}> <span><b>Subscription</b> – include in subscription totals, alert me if the price changes</span></label>
+    <label class="check full"><input type="checkbox" name="autopay" ${d.autopay ? 'checked' : ''}> <span><b>Autopay</b> – record it automatically on the date (leave off if bank sync brings it in)</span></label>
     ${r ? `<label class="check full"><input type="checkbox" name="active" ${d.active ? 'checked' : ''}> Active</label>` : '<label class="check full"><input type="checkbox" name="set_plan" checked> Plan this amount in the budget category for every month it falls in (where nothing is planned yet)</label>'}
     <p class="muted small full" id="desc"></p>
     <div class="row end full">${r ? '<button type="button" class="btn danger" id="del">Delete</button><span class="sp"></span>' : ''}<button class="btn primary">Save</button></div></form>`, (m, close) => {
@@ -62,7 +63,7 @@ export function billEditor(r = null) {
     f.onsubmit = async (e) => {
       e.preventDefault();
       const b = { name: f.name.value, kind, amount: fromInput(f.amount.value), rule: buildRule(), item_id: +f.item_id.value || null, account_id: +f.account_id.value || null, to_account_id: +f.to_account_id.value || null,
-        remind_days: +f.remind_days.value, autopay: f.autopay.checked, active: r ? f.active.checked : true, set_plan: !r && f.set_plan?.checked, note: d.note || '' };
+        remind_days: +f.remind_days.value, autopay: f.autopay.checked, is_sub: f.is_sub.checked, active: r ? f.active.checked : true, set_plan: !r && f.set_plan?.checked, note: d.note || '' };
       try { await api(r ? 'PUT' : 'POST', r ? `/api/recurring/${r.id}` : '/api/recurring', b); close(); toast('Saved'); refresh(); } catch (err) { toast(err.message, 'err'); }
     };
     if (r) $('#del', m).onclick = async () => { if (await confirmBox('Delete', `Delete “${esc(r.name)}”? Past payments stay in your transactions.`, 'Delete', true)) { await api('DELETE', `/api/recurring/${r.id}`); close(); refresh(); } };

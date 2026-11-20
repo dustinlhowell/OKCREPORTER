@@ -64,7 +64,7 @@ export async function debtsView(main) {
 function debtCard(d, i, s, thisMonth) {
   const paid = s.paidThisMonth[d.id] || 0, target = (thisMonth[d.id] || 0) + paid;
   return `<section class="dcard card ${i === 0 ? 'focus' : ''}" data-id="${d.id}">
-    <div class="drow"><span class="rank">${i + 1}</span><div class="grow"><b>${esc(d.name)}</b> <span class="muted small">${esc(d.kind)}${d.due_day ? ` · due the ${d.due_day}${['th', 'st', 'nd', 'rd'][(d.due_day % 100 > 10 && d.due_day % 100 < 14) ? 0 : d.due_day % 10] || 'th'}` : ''}</span>
+    <div class="drow"><span class="rank">${i + 1}</span><div class="grow"><b>${esc(d.name)}</b> <span class="muted small">${esc(d.kind)}${d.synced ? ' · 🔗 balance from bank' : ''}${d.due_day ? ` · due the ${d.due_day}${['th', 'st', 'nd', 'rd'][(d.due_day % 100 > 10 && d.due_day % 100 < 14) ? 0 : d.due_day % 10] || 'th'}` : ''}</span>
       ${i === 0 ? '<div class="focuslbl">🎯 Focus debt – every extra dollar goes here</div>' : ''}</div><b class="big">${money(d.current)}</b></div>
     ${bar(d.progress * 100, 'good')}<div class="row small muted"><span>${Math.round(d.progress * 100)}% paid of ${money0(d.original)}</span><span class="sp"></span><span>Min ${money0(d.min_payment)}</span><span>· Paid off <b>${d.payoff ? monthName(d.payoff, 'short') : '—'}</b></span></div>
     <div class="row small"><span>This month: paid <b>${money0(paid)}</b> of <b>${money0(target)}</b> planned</span>${bar(target ? paid / target * 100 : 0, paid >= target && target ? 'good' : '')}</div>
@@ -93,13 +93,14 @@ function debtEditor(d = null) {
     <label>Minimum payment<input name="min_payment" inputmode="decimal" value="${toInput(d?.min_payment || 0)}" placeholder="0.00"></label>
     <label>Due day of month<input name="due_day" type="number" min="1" max="31" value="${d?.due_day || ''}"></label>
     <label>Original amount (for progress)<input name="original" inputmode="decimal" value="${toInput(d?.original || 0)}" placeholder="same as balance"></label>
+    <label class="full">Linked account<select name="account_id"><option value="">— not linked —</option>${accountOptions(d?.account_id, { kinds: ['credit'] })}</select><small class="muted">For a credit card synced from your bank: its balance comes straight from the bank, and payments you transfer to it count toward the snowball.</small></label>
     <label class="full">Notes<input name="note" value="${esc(d?.note || '')}" placeholder="Account #, website, phone…"></label>
     <div class="row end full">${d ? '<button type="button" class="btn danger" id="del">Delete</button><span class="sp"></span>' : ''}<button class="btn primary">Save</button></div></form>
     ${d ? '' : '<p class="muted small">A matching line is added to the Debt group of your budget – payments logged there come off the balance automatically.</p>'}`, (m, close) => {
     const f = $('form', m);
     f.onsubmit = async (e) => {
       e.preventDefault();
-      const b = { name: f.name.value, kind: f.kind.value, min_payment: fromInput(f.min_payment.value), due_day: +f.due_day.value || null, note: f.note.value };
+      const b = { name: f.name.value, kind: f.kind.value, min_payment: fromInput(f.min_payment.value), due_day: +f.due_day.value || null, note: f.note.value, account_id: +f.account_id.value || null };
       if (f.original.value) b.original = fromInput(f.original.value);
       if (!d) b.balance = fromInput(f.balance.value);
       try { await api(d ? 'PATCH' : 'POST', d ? `/api/debts/${d.id}` : '/api/debts', b); close(); toast('Saved'); refresh(); } catch (err) { toast(err.message, 'err'); }
