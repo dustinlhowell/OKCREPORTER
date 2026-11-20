@@ -1425,10 +1425,11 @@ When the user says they spent, paid, bought or received money, call log_transact
 Use budget_status to answer "how much is left / can I afford" questions, upcoming_bills for what's due, and debt_snowball for debt progress.
 Bank transactions arrive automatically; new_transactions lists what needs a category and categorize_transaction files them. subscriptions and spending_insights cover recurring charges and trends. Today is ${'${today}'} (${TZ}).`;
 function tokenUser(req, kinds) {
-  // "Bearer <token>"; a bare personal token is accepted too (a common slip when building a Shortcut).
-  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '') || (/^lgp_\S+$/.test(String(req.headers.authorization || '').trim()) && kinds.includes('pat') ? [null, String(req.headers.authorization).trim()] : null);
-  if (!m) return null;
-  const row = q('SELECT t.id, t.kind, t.client_id, t.expires, u.id AS uid, u.name, u.email, u.color FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.hash = ?').get(sha(m[1].trim()));
+  // "Bearer <token>". Forgiving of what phones paste: invisible characters, quotes, "Bearer:", extra spaces, or a bare token.
+  // Ledger tokens are lga_/lgr_/lgp_ + base64url, so pick exactly that out of whatever was pasted around it.
+  const tok = /lg[par]_[A-Za-z0-9_-]{16,}/.exec(String(req.headers.authorization || ''))?.[0] || '';
+  if (!tok) return null;
+  const row = q('SELECT t.id, t.kind, t.client_id, t.expires, u.id AS uid, u.name, u.email, u.color FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.hash = ?').get(sha(tok));
   if (!row || !kinds.includes(row.kind) || (row.expires && row.expires < Date.now())) return null;
   q('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(Date.now(), row.id);
   return { id: row.uid, name: row.name, email: row.email, color: row.color };
@@ -1591,9 +1592,15 @@ route('POST', '/api/spend', ({ req, body, query }) => {
   if (query.format !== 'text') return spend(req, body);
   try { return spend(req, body).message; } catch (e) { return `⚠️ ${e.status === 500 || !e.status ? 'Ledger hit an error' : e.message}`; }
 }, { public: true });
+const tokenProblem = (req) => {
+  const h = String(req.headers.authorization || '').trim();
+  if (!h) return 'No Authorization header was sent – in this Get Contents of URL action, add a header: key Authorization, text Bearer + space + your token';
+  if (!/lgp_/.test(h)) return 'The Authorization header doesn’t contain a Ledger phone token (they start with lgp_) – paste the token from Ledger → Settings → Phone';
+  return 'That token isn’t recognized (it may be incomplete or revoked) – create a new one in Ledger → Settings → Phone and paste it again';
+};
 function spend(req, body) {
   const user = tokenUser(req, ['pat']);
-  if (!user) throw new HttpError(401, 'Missing or invalid token – create a new one in Ledger → Settings → Phone');
+  if (!user) throw new HttpError(401, tokenProblem(req));
   if (body.amount !== undefined) {
     const tool = buildTools(toolDeps, user).find((t) => t.name === 'log_transaction');
     const args = { ...body };
@@ -1614,7 +1621,7 @@ function spend(req, body) {
 // The category menu for the phone Shortcut: most-used first, each with what's left this month.
 route('GET', '/api/spend/categories', ({ req, query }) => {
   const user = tokenUser(req, ['pat']);
-  if (!user) throw new HttpError(401, 'Missing or invalid token');
+  if (!user) throw new HttpError(401, tokenProblem(req));
   const income = query.kind === 'income';
   const v = monthView(B.isMonth(query.month) ? query.month : today().slice(0, 7));
   const uses = new Map(q("SELECT l.item_id, COUNT(*) n FROM lines l JOIN txns t ON t.id = l.txn_id WHERE t.date >= ? AND l.item_id IS NOT NULL GROUP BY l.item_id").all(B.addDays(today(), -90)).map((r) => [r.item_id, r.n]));
@@ -1625,7 +1632,7 @@ route('GET', '/api/spend/categories', ({ req, query }) => {
 }, { public: true });
 route('GET', '/api/spend/status', ({ req, query }) => {
   const user = tokenUser(req, ['pat']);
-  if (!user) throw new HttpError(401, 'Missing or invalid token');
+  if (!user) throw new HttpError(401, tokenProblem(req));
   return { message: buildTools(toolDeps, user).find((t) => t.name === 'budget_status').run({ category: query.category || undefined }) };
 }, { public: true });
 route('GET', '/api/tokens', ({ user }) => ({
