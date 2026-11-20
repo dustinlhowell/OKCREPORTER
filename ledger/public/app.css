@@ -349,3 +349,19 @@ body.auth { display: grid; place-items: center; min-height: 100vh; padding: 16px
   .quick .chips { max-height: 30vh; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---------- bank review tray, subscriptions ---------- */
+.tray { display: flex; flex-direction: column; gap: 8px; }
+.tcard { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--panel); transition: opacity .25s, transform .25s; }
+.tcard.gone { opacity: 0; transform: translateX(40px); }
+.trow { display: flex; gap: 10px; align-items: flex-start; }
+.trow .amt { font-size: 17px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tcard .raw { font-family: ui-monospace, Menlo, monospace; font-size: 11px; opacity: .8; }
+.tacts { margin-top: 8px; } .tacts select { max-width: 220px; font-size: 14px; padding: 5px 8px; }
+.intray { border: 2px solid var(--acc); }
+.tile b small { font-size: 13px; font-weight: 600; color: var(--mute); margin-left: 2px; }
+.subs .list li .amt, .subs .amt { display: flex; flex-direction: column; align-items: flex-end; flex: none; }
+#tabs a { position: relative; }
+.tbadge:not(:empty) { position: absolute; top: -2px; right: 12px; background: var(--warn); color: #fff; font-style: normal; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 8px; }
+ol.small { padding-left: 20px; } ol.small li { margin: 3px 0; }
+@media (max-width: 760px) { .tacts select { max-width: none; flex: 1; } }

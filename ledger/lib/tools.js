@@ -115,6 +115,65 @@ export function buildTools(d, user) {
         return `Moved ${$(amt)} from ${f.name} to ${t.name} for ${monthLabel(month)}. ${itemLine(month, f.id)}. ${itemLine(month, t.id)}.`;
       },
     },
+    {
+      name: 'new_transactions',
+      description: 'Transactions waiting in the review tray: new ones pulled from the bank and anything without a category. Shows the suggested category when Ledger has one. Use before categorize_transaction.',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: { limit: num('How many (default 25)') } },
+      run: (a) => {
+        const rows = d.listTxns({ inbox: true, limit: Math.min(200, a.limit || 25) });
+        if (!rows.length) return 'Nothing to review – everything has a category. 🎉';
+        const items = new Map(d.itemsFlat().map((i) => [i.id, i.name]));
+        return rows.map((t) => `#${t.id} ${t.date} ${t.kind === 'income' ? '+' : t.kind === 'transfer' ? '⇄' : '−'}${$(t.amount)} ${t.payee || '(no payee)'}${t.account_name ? ` (${t.account_name})` : ''}${t.kind === 'transfer' ? ` → ${t.to_account_name}` : t.lines.some((l) => l.item_id) ? ` → ${t.lines.map((l) => l.item_name).join(', ')}` : t.suggest_item_id ? ` – suggested: ${items.get(t.suggest_item_id)}` : ' – needs a category'}`).join('\n');
+      },
+    },
+    {
+      name: 'categorize_transaction',
+      description: 'File a transaction from the review tray under a budget category (and approve it). Use the #id from new_transactions. Pass category "suggested" to accept Ledger\'s suggestion, or approve_all_suggested=true to accept every suggestion at once.',
+      inputSchema: { type: 'object', properties: { id: num('Transaction id (the number after #)'), category: str('Category name, or "suggested"'), payee: str('Optional nicer payee name to remember for next time'), approve_all_suggested: { type: 'boolean', description: 'Approve every transaction that has a suggestion' } } },
+      run: (a) => {
+        if (a.approve_all_suggested) {
+          const rows = d.listTxns({ inbox: true, limit: 1000 }).filter((t) => !t.reviewed && t.kind !== 'transfer' && t.lines.length === 1 && !t.lines[0].item_id && t.suggest_item_id);
+          for (const t of rows) d.saveTxn(user.id, { reviewed: true, lines: [{ item_id: t.suggest_item_id, amount: t.amount }] }, t.id);
+          return `Approved ${rows.length} suggested categor${rows.length === 1 ? 'y' : 'ies'}.`;
+        }
+        const id = Math.round(Number(a.id));
+        const t = d.listTxns({ inbox: true, limit: 1000 }).find((x) => x.id === id) || d.listTxns({ limit: 300 }).find((x) => x.id === id);
+        if (!t) throw new Error(`No transaction #${a.id}`);
+        if (t.kind === 'transfer') { d.saveTxn(user.id, { reviewed: true }, id); return `Approved transfer ${$(t.amount)} ${t.account_name} → ${t.to_account_name}.`; }
+        const item = !a.category || /^suggest/i.test(a.category) ? d.itemsFlat().find((i) => i.id === t.suggest_item_id) : findItem(a.category, { income: t.kind === 'income' });
+        if (!item) throw new Error(a.category && !/^suggest/i.test(a.category) ? `No category matches "${a.category}"` : 'No suggestion for this one – give a category.');
+        d.saveTxn(user.id, { reviewed: true, payee: a.payee || undefined, lines: [{ item_id: item.id, amount: t.amount }] }, id);
+        return `Filed ${$(t.amount)} ${a.payee || t.payee} under ${item.name}. ${t.kind !== 'transfer' ? itemLine(t.date.slice(0, 7), item.id) : ''}`;
+      },
+    },
+    {
+      name: 'subscriptions',
+      description: 'Subscriptions and recurring bills: what each costs per month/year, next charge, price changes, newly detected recurring charges from the bank, and where to cancel.',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: {} },
+      run: () => {
+        const s = d.subscriptions();
+        const lines = [`Subscriptions: ${$(s.totals.subsMonthly)}/month (${$(s.totals.subsYearly)}/year). All recurring bills: ${$(s.totals.billsMonthly)}/month.`];
+        for (const x of s.list.filter((x) => x.active)) lines.push(`- ${x.name}: ${$(x.amount)} ${x.describe}${x.next ? `, next ${x.next}` : ''}${x.change ? ` (changed ${$(x.change.from)} → ${$(x.change.to)})` : ''}${x.is_sub ? ` · cancel: ${x.cancel_url}` : ''}`);
+        if (s.detected.length) { lines.push('\nFound in bank history, not tracked yet:'); for (const x of s.detected) lines.push(`- ${x.payee}: ${$(x.amount)} ${x.label} (${$(x.yearly)}/yr), next about ${x.next}`); }
+        const gone = s.list.filter((x) => x.cancelled_on);
+        if (gone.length) lines.push(`\nCancelled: ${gone.map((x) => `${x.name} (${x.cancelled_on})`).join(', ')} – saving ${$(s.totals.savedYearly)}/year.`);
+        return lines.join('\n');
+      },
+    },
+    {
+      name: 'spending_insights',
+      description: 'How spending compares: this week vs a typical week, this month so far vs the same point last month, biggest category increases, and subscriptions renewing this week.',
+      readOnly: true,
+      inputSchema: { type: 'object', properties: {} },
+      run: () => {
+        const i = d.insights();
+        return [`This week: ${$(i.week)} (typical week ${$(i.typicalWeek)}).`, `Month so far: ${$(i.mtd)} vs ${$(i.lastMtd)} at this point in ${i.monthLabel}.`,
+          i.up.length ? `Up most: ${i.up.map((x) => `${x.name} +${$(x.diff)}`).join(', ')}.` : 'No big increases.', i.down.length ? `Down: ${i.down.map((x) => `${x.name} ${$(x.diff)}`).join(', ')}.` : '',
+          i.renewals.length ? `Renewing this week: ${i.renewals.map((r) => `${r.name} ${$(r.amount)} on ${r.date}`).join(', ')}.` : ''].filter(Boolean).join('\n');
+      },
+    },
   ];
 }
 

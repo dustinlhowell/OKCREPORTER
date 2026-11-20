@@ -67,12 +67,34 @@ CREATE TABLE IF NOT EXISTS payees(key TEXT PRIMARY KEY, name TEXT NOT NULL, item
 -- Audit trail of budget changes (money moves, plan copies, deletes) so nothing changes silently.
 CREATE TABLE IF NOT EXISTS activity(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, user_id INTEGER, kind TEXT NOT NULL, text TEXT NOT NULL, data TEXT);
 CREATE INDEX IF NOT EXISTS activity_at ON activity(at DESC);
+
+-- Bank sync via SimpleFIN Bridge. access = encrypted Access URL (key in DATA_DIR/secret.key).
+CREATE TABLE IF NOT EXISTS bank_links(id INTEGER PRIMARY KEY, access TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'SimpleFIN', start_date TEXT NOT NULL,
+  auto_approve INTEGER NOT NULL DEFAULT 0, last_sync INTEGER, last_ok INTEGER, last_error TEXT, errors TEXT, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS bank_accounts(id TEXT PRIMARY KEY, link_id INTEGER NOT NULL REFERENCES bank_links(id) ON DELETE CASCADE, org TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL, currency TEXT, balance INTEGER, available INTEGER, balance_date INTEGER, account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  enabled INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL);
+-- Payee renames learned from the review tray: cleaned bank name -> the name the user prefers.
+CREATE TABLE IF NOT EXISTS bank_ignored(bank_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS payee_names(key TEXT PRIMARY KEY, name TEXT NOT NULL) WITHOUT ROWID;
 `;
 
 export function openDb(file) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // Columns added after the first release.
+  const addCol = (t, c, def) => { if (!db.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`); };
+  addCol('txns', 'bank_id', 'TEXT');            // SimpleFIN transaction id (account id + txn id)
+  addCol('txns', 'bank_id2', 'TEXT');           // other side of a transfer between two linked accounts
+  addCol('txns', 'raw_payee', "TEXT NOT NULL DEFAULT ''");
+  addCol('txns', 'reviewed', 'INTEGER NOT NULL DEFAULT 1'); // 0 = waiting in the "New transactions" tray
+  addCol('txns', 'suggest_item_id', 'INTEGER');
+  addCol('recurring', 'is_sub', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('recurring', 'cancelled_on', 'TEXT');
+  addCol('debts', 'account_id', 'INTEGER');    // linked account: its bank balance is the debt balance
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS txns_bank ON txns(bank_id) WHERE bank_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS txns_review ON txns(reviewed) WHERE reviewed = 0;`);
   const cache = new Map();
   const q = (sql) => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };
   let depth = 0;

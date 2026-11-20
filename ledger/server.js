@@ -12,6 +12,8 @@ import { buildTools, validate } from './lib/tools.js';
 import { deliver, hasChannel, smtpConfigured, pushoverConfigured } from './lib/notify.js';
 import { encrypt, s3Client } from './lib/offsite.js';
 import { newSecret, otpauthUri, verifyTotp, newRecoveryCodes, useRecoveryCode } from './lib/totp.js';
+import * as SF from './lib/simplefin.js';
+import * as INS from './lib/insights.js';
 
 const { fmtMoney: $ } = B;
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -131,6 +133,7 @@ const changed = (origin, what = 'all') => broadcast('change', { what }, origin);
 const settings = () => ({
   start_month: kv('start_month', '2026-11'), end_month: kv('end_month', '2027-12'), week_start: +kv('week_start', 0),
   household: kv('household', 'Our budget'), snowball_extra: +kv('snowball_extra', 0), low_pct: +kv('low_pct', 90),
+  large_charge: +kv('large_charge', 50000), low_balance: +kv('low_balance', 10000),
 });
 const budgetMonths = () => { const s = settings(); return B.monthsBetween(s.start_month, s.end_month); };
 function log(uid, kind, text, data) { q('INSERT INTO activity(at, user_id, kind, text, data) VALUES (?, ?, ?, ?, ?)').run(Date.now(), uid ?? null, kind, text, data ? JSON.stringify(data) : null); }
@@ -218,12 +221,21 @@ const defaultAccount = () => q("SELECT id FROM accounts WHERE archived = 0 ORDER
 function debtList({ archived = false } = {}) {
   return q(`SELECT d.*, i.name AS item_name,
       COALESCE((SELECT SUM(CASE WHEN t.kind = 'income' THEN -l.amount ELSE l.amount END) FROM lines l JOIN txns t ON t.id = l.txn_id WHERE l.item_id = d.item_id AND t.kind != 'transfer' AND t.date >= d.as_of), 0) AS paid,
-      COALESCE((SELECT SUM(amount) FROM debt_adjust a WHERE a.debt_id = d.id AND a.date >= d.as_of), 0) AS added
-    FROM debts d LEFT JOIN items i ON i.id = d.item_id ${archived ? '' : 'WHERE d.archived = 0'} ORDER BY d.id`).all()
-    .map((d) => { const current = d.balance - d.paid + d.added; return { ...d, current, progress: d.original > 0 ? Math.max(0, Math.min(1, (d.original - Math.max(0, current)) / d.original)) : 0 }; });
+      COALESCE((SELECT SUM(amount) FROM debt_adjust a WHERE a.debt_id = d.id AND a.date >= d.as_of), 0) AS added,
+      COALESCE((SELECT SUM(t.amount) FROM txns t WHERE t.kind = 'transfer' AND d.account_id IS NOT NULL AND t.to_account_id = d.account_id AND t.date >= d.as_of), 0) AS paid_tr,
+      (SELECT ba.balance FROM bank_accounts ba WHERE d.account_id IS NOT NULL AND ba.account_id = d.account_id AND ba.enabled = 1 AND ba.balance IS NOT NULL ORDER BY ba.balance_date DESC LIMIT 1) AS bank_balance,
+      a.name AS account_name
+    FROM debts d LEFT JOIN items i ON i.id = d.item_id LEFT JOIN accounts a ON a.id = d.account_id ${archived ? '' : 'WHERE d.archived = 0'} ORDER BY d.id`).all()
+    .map((d) => {
+      const synced = d.bank_balance != null;
+      const current = synced ? Math.abs(d.bank_balance) : d.balance - d.paid - d.paid_tr + d.added;
+      return { ...d, synced, current, progress: d.original > 0 ? Math.max(0, Math.min(1, (d.original - Math.max(0, current)) / d.original)) : 0 };
+    });
 }
 function debtPaidIn(d, month) {
-  return q(`SELECT COALESCE(SUM(CASE WHEN t.kind = 'income' THEN -l.amount ELSE l.amount END), 0) v FROM lines l JOIN txns t ON t.id = l.txn_id WHERE l.item_id = ? AND t.kind != 'transfer' AND t.date >= ? AND t.date <= ?`).get(d.item_id, `${month}-01`, B.lastDay(month)).v;
+  const from = `${month}-01`, to = B.lastDay(month);
+  return q(`SELECT COALESCE(SUM(CASE WHEN t.kind = 'income' THEN -l.amount ELSE l.amount END), 0) v FROM lines l JOIN txns t ON t.id = l.txn_id WHERE l.item_id = ? AND t.kind != 'transfer' AND t.date >= ? AND t.date <= ?`).get(d.item_id, from, to).v
+    + (d.account_id ? q("SELECT COALESCE(SUM(amount), 0) v FROM txns WHERE kind = 'transfer' AND to_account_id = ? AND date >= ? AND date <= ?").get(d.account_id, from, to).v : 0);
 }
 function debtSummary() {
   const debts = debtList(), s = settings(), month = today().slice(0, 7);
@@ -267,7 +279,7 @@ function scheduled(from, to) {
   const recItems = new Set(recs.map((r) => r.item_id).filter(Boolean));
   for (const r of recs) for (const d of B.occurrences(r.rule, from, to)) {
     const key = `${r.id}:${d}`, p = paid.get(key);
-    out.push({ type: 'bill', id: r.id, name: r.name, kind: r.kind, date: d, amount: p ? p.amount : r.amount, item_id: r.item_id, item_name: r.item_name, account_id: r.account_id,
+    out.push({ type: 'bill', id: r.id, name: r.name, payee: r.payee, is_sub: !!r.is_sub, kind: r.kind, date: d, amount: p ? p.amount : r.amount, item_id: r.item_id, item_name: r.item_name, account_id: r.account_id,
       to_account_id: r.to_account_id, autopay: r.autopay, txn_id: p?.id || null, status: p ? 'paid' : skipped.has(key) ? 'skipped' : d < t ? 'overdue' : d === t ? 'due today' : 'upcoming' });
   }
   // Debt minimums with a due day (unless a recurring bill already covers that debt's category).
@@ -317,9 +329,10 @@ function cashflow(from, to) {
 }
 
 // ---- transactions
-function payeeItem(name) {
+function payeeItem(name, kind = null) {
   const k = String(name || '').toLowerCase().trim();
   if (!k) return null;
+  if (kind) { const it = payeeItem(name); return it && (it.kind === 'income') === (kind === 'income') ? it : null; }
   const r = q('SELECT p.item_id FROM payees p JOIN items i ON i.id = p.item_id WHERE p.key = ? AND i.archived = 0').get(k)
     || q("SELECT p.item_id FROM payees p JOIN items i ON i.id = p.item_id WHERE i.archived = 0 AND (? LIKE p.key || '%' OR p.key LIKE ? || '%') AND length(p.key) >= 4 ORDER BY p.uses DESC LIMIT 1").get(k, k);
   return r ? itemsFlat().find((i) => i.id === r.item_id) || null : null;
@@ -336,8 +349,9 @@ function getTxn(id) {
   t.lines = q('SELECT l.id, l.item_id, l.amount, l.note, i.name AS item_name, i.emoji FROM lines l LEFT JOIN items i ON i.id = l.item_id WHERE l.txn_id = ? ORDER BY l.id').all(id);
   return t;
 }
-function listTxns({ from, to, item, account, search, uncategorized, user, kind, limit = 500, offset = 0 } = {}) {
+function listTxns({ from, to, item, account, search, uncategorized, inbox, user, kind, limit = 500, offset = 0 } = {}) {
   const w = [], p = {};
+  if (inbox) { w.push("(t.reviewed = 0 OR (t.kind != 'transfer' AND t.date >= :bstart AND EXISTS (SELECT 1 FROM lines l WHERE l.txn_id = t.id AND l.item_id IS NULL)))"); p.bstart = `${settings().start_month}-01`; }
   if (from) { w.push('t.date >= :from'); p.from = from; }
   if (to) { w.push('t.date <= :to'); p.to = to; }
   if (item) { w.push('EXISTS (SELECT 1 FROM lines l WHERE l.txn_id = t.id AND l.item_id = :item)'); p.item = +item; }
@@ -374,9 +388,11 @@ function saveTxn(uid, body, id = null, origin = null) {
   const payee = str(body.payee ?? prev?.payee ?? '', 120), note = str(body.note ?? prev?.note ?? '', 500);
   let recurring_id = body.recurring_id !== undefined ? (body.recurring_id ? +body.recurring_id : null) : prev?.recurring_id ?? null;
   let occ_date = body.occ_date !== undefined ? body.occ_date || null : prev?.occ_date ?? null;
-  // Paying a scheduled bill: link it to the nearest unpaid occurrence of a bill in the same category.
-  if (!id && !recurring_id && kind === 'expense' && lines.length === 1 && lines[0].item_id && body.autolink !== false) {
-    const cand = scheduled(B.addDays(date, -12), B.addDays(date, 12)).filter((s) => s.type === 'bill' && s.item_id === lines[0].item_id && s.status !== 'paid' && s.status !== 'skipped')
+  const reviewed = body.reviewed !== undefined ? (body.reviewed ? 1 : 0) : 1;
+  // Paying a scheduled bill: link it to the nearest unpaid occurrence of a bill in the same category (or with the same payee).
+  if ((!id || (prev && !prev.reviewed)) && reviewed && !recurring_id && kind === 'expense' && lines.length === 1 && lines[0].item_id && body.autolink !== false) {
+    const pk = SF.payeeKey(payee);
+    const cand = scheduled(B.addDays(date, -12), B.addDays(date, 12)).filter((s) => s.type === 'bill' && (s.item_id === lines[0].item_id || (pk && SF.payeeKey(s.payee || s.name) === pk)) && s.status !== 'paid' && s.status !== 'skipped')
       .sort((a, b) => Math.abs(B.dayDiff(a.date, date)) - Math.abs(B.dayDiff(b.date, date)))[0];
     if (cand) { recurring_id = cand.id; occ_date = cand.date; }
   }
@@ -384,24 +400,30 @@ function saveTxn(uid, body, id = null, origin = null) {
   const tid = tx(() => {
     let tid = id;
     const cleared = body.cleared !== undefined ? (body.cleared ? 1 : 0) : prev?.cleared ?? 0;
-    if (id) q('UPDATE txns SET date=?, kind=?, amount=?, payee=?, note=?, account_id=?, to_account_id=?, cleared=?, recurring_id=?, occ_date=?, updated=? WHERE id=?')
-      .run(date, kind, amount, payee, note, account_id, to_account_id, cleared, recurring_id, occ_date, now, id);
-    else tid = Number(q('INSERT INTO txns(date, kind, amount, payee, note, account_id, to_account_id, cleared, recurring_id, occ_date, import_hash, user_id, source, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(date, kind, amount, payee, note, account_id, to_account_id, cleared, recurring_id, occ_date, body.import_hash || null, uid ?? null, str(body.source || 'web', 20), now, now).lastInsertRowid);
+    const suggest = body.suggest_item_id !== undefined ? body.suggest_item_id : prev?.suggest_item_id ?? null;
+    if (id) q('UPDATE txns SET date=?, kind=?, amount=?, payee=?, note=?, account_id=?, to_account_id=?, cleared=?, recurring_id=?, occ_date=?, reviewed=?, suggest_item_id=?, updated=? WHERE id=?')
+      .run(date, kind, amount, payee, note, account_id, to_account_id, cleared, recurring_id, occ_date, reviewed, suggest, now, id);
+    else tid = Number(q('INSERT INTO txns(date, kind, amount, payee, note, account_id, to_account_id, cleared, recurring_id, occ_date, import_hash, user_id, source, created, updated, bank_id, raw_payee, reviewed, suggest_item_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(date, kind, amount, payee, note, account_id, to_account_id, cleared, recurring_id, occ_date, body.import_hash || null, uid ?? null, str(body.source || 'web', 20), now, now, body.bank_id || null, str(body.raw_payee || '', 300), reviewed, suggest).lastInsertRowid);
     q('DELETE FROM lines WHERE txn_id = ?').run(tid);
     for (const l of lines) q('INSERT INTO lines(txn_id, item_id, amount, note) VALUES (?, ?, ?, ?)').run(tid, l.item_id, l.amount, l.note);
-    if (lines.length === 1 && lines[0].item_id && payee && kind === 'expense') learnPayee(payee, lines[0].item_id);
+    if (reviewed && lines.length === 1 && lines[0].item_id && payee && kind !== 'transfer') learnPayee(payee, lines[0].item_id);
+    // Renaming a bank payee teaches Ledger the name to use next time.
+    if (prev?.raw_payee && payee && payee !== prev.payee) q('INSERT OR REPLACE INTO payee_names(key, name) VALUES (?, ?)').run(SF.payeeKey(SF.cleanPayee(prev.raw_payee)), payee);
     return tid;
   });
-  changed(origin, 'txns');
   const t = getTxn(tid);
-  setImmediate(() => { checkPaidOff().catch(() => {}); envelopeAlerts(t, uid).catch(() => {}); });
+  if (!body.quiet) {
+    changed(origin, 'txns');
+    setImmediate(() => { checkPaidOff().catch(() => {}); envelopeAlerts(t, uid).catch(() => {}); });
+  }
   return t;
 }
 function deleteTxn(uid, id, origin) {
   const t = getTxn(id);
   if (!t) notFound();
   q('DELETE FROM txns WHERE id = ?').run(id);
+  forgetBank(t);
   log(uid, 'delete', `Deleted ${t.kind} ${$(t.amount)} ${t.payee} on ${t.date}`, t);
   changed(origin, 'txns');
   setImmediate(() => checkPaidOff().catch(() => {}));
@@ -426,7 +448,7 @@ function moveMoney(uid, month, fromId, toId, amount, origin = null) {
 }
 
 // ---- notifications
-const DEFAULT_PREFS = { notify: {}, digest: { on: true, time: '08:00' }, alerts: true, planReminder: true };
+const DEFAULT_PREFS = { notify: {}, digest: { on: true, time: '08:00' }, alerts: true, planReminder: true, bank: true, insights: true };
 const prefsOf = (u) => { const p = JSON.parse(u.prefs || '{}'); return { ...DEFAULT_PREFS, ...p, notify: { ...(p.notify || {}) }, digest: { ...DEFAULT_PREFS.digest, ...(p.digest || {}) } }; };
 const link = (path) => (PUBLIC_URL ? `${PUBLIC_URL}/#${path}` : undefined);
 const once = (key) => q('INSERT OR IGNORE INTO notify_log(key, at) VALUES (?, ?)').run(key, Date.now()).changes > 0;
@@ -440,7 +462,7 @@ async function notifyUser(u, msg) {
 async function notifyAll(kind, title, body, extra = {}) {
   for (const u of q('SELECT * FROM users').all()) {
     const p = prefsOf(u);
-    if ((kind === 'alerts' && !p.alerts) || (kind === 'plan' && !p.planReminder)) continue;
+    if ((kind === 'alerts' && !p.alerts) || (kind === 'plan' && !p.planReminder) || (kind === 'bank' && !p.bank) || (kind === 'insights' && !p.insights)) continue;
     await notifyUser(u, { title, body, url: link('/'), ...extra }).catch(() => {});
   }
 }
@@ -485,6 +507,8 @@ async function notificationTick() {
     const v = monthView(next);
     if (v.summary.planned === 0) await notifyAll('plan', `🗓️ Time to plan ${B.monthLabel(next)}`, `Next month's budget is empty. Open Ledger → Budget → ${B.monthLabel(next, 'short')} and use “Copy last month” to start.`);
   }
+  // Sunday evening: weekly spending insights.
+  if (new Date(t + 'T12:00:00Z').getUTCDay() === 0 && hhmm >= '18:00' && once(`insights:${t}`)) { const m = insightsMessage(); if (m) await notifyAll('insights', m.title, m.body, { url: link('/home'), tags: ['bar_chart'] }); }
   q("DELETE FROM notify_log WHERE at < ? AND key NOT LIKE 'over:%' AND key NOT LIKE 'low:%' AND key NOT LIKE 'plan:%'").run(Date.now() - 60 * DAY);
 }
 // Autopay: post scheduled transactions on their date.
@@ -618,6 +642,8 @@ route('PUT', '/api/settings', ({ body, user, origin }) => {
   if (body.week_start !== undefined) setKv('week_start', +body.week_start ? 1 : 0);
   if (body.household !== undefined) setKv('household', str(body.household, 60) || 'Our budget');
   if (body.low_pct !== undefined) setKv('low_pct', Math.max(50, Math.min(100, +body.low_pct || 90)));
+  if (body.large_charge !== undefined) setKv('large_charge', Math.max(0, cents(body.large_charge)));
+  if (body.low_balance !== undefined) setKv('low_balance', Math.max(0, cents(body.low_balance)));
   if (body.snowball_extra !== undefined) { const c = Math.max(0, cents(body.snowball_extra)); setKv('snowball_extra', c); log(user.id, 'debt', `Snowball extra set to ${$(c)}/month`); }
   changed(origin, 'settings');
   return settings();
@@ -765,7 +791,7 @@ route('DELETE', '/api/accounts/:id', ({ params, origin }) => {
 });
 
 // ---- transactions
-route('GET', '/api/txns', ({ query }) => listTxns({ ...query, uncategorized: query.uncategorized === '1' }));
+route('GET', '/api/txns', ({ query }) => listTxns({ ...query, uncategorized: query.uncategorized === '1', inbox: query.inbox === '1' }));
 route('GET', '/api/txns/:id', ({ params }) => getTxn(+params.id) || notFound());
 route('POST', '/api/txns', ({ user, body, origin }) => saveTxn(user.id, body, null, origin));
 route('PUT', '/api/txns/:id', ({ user, params, body, origin }) => saveTxn(user.id, body, +params.id, origin));
@@ -774,8 +800,9 @@ route('POST', '/api/txns/bulk', ({ user, body, origin }) => {
   const ids = (body.ids || []).map(Number);
   tx(() => {
     for (const id of ids) {
-      if (body.action === 'delete') { q('DELETE FROM txns WHERE id = ?').run(id); continue; }
-      if (body.action === 'categorize') { const t = getTxn(id); if (t && t.kind !== 'transfer' && t.lines.length <= 1) { q('DELETE FROM lines WHERE txn_id = ?').run(id); q('INSERT INTO lines(txn_id, item_id, amount) VALUES (?, ?, ?)').run(id, body.item_id ? +body.item_id : null, t.amount); if (t.kind === 'expense') learnPayee(t.payee, +body.item_id); } }
+      if (body.action === 'delete') { forgetBank(q('SELECT bank_id, bank_id2 FROM txns WHERE id = ?').get(id)); q('DELETE FROM txns WHERE id = ?').run(id); continue; }
+      if (body.action === 'categorize') { const t = getTxn(id); if (t && t.kind !== 'transfer' && t.lines.length <= 1) { q('DELETE FROM lines WHERE txn_id = ?').run(id); q('INSERT INTO lines(txn_id, item_id, amount) VALUES (?, ?, ?)').run(id, body.item_id ? +body.item_id : null, t.amount); if (body.item_id) { q('UPDATE txns SET reviewed = 1 WHERE id = ?').run(id); learnPayee(t.payee, +body.item_id); } } }
+      if (body.action === 'approve') q('UPDATE txns SET reviewed = 1 WHERE id = ?').run(id);
       if (body.action === 'clear') q('UPDATE txns SET cleared = ? WHERE id = ?').run(body.cleared ? 1 : 0, id);
     }
     if (body.action === 'delete') log(user.id, 'delete', `Deleted ${ids.length} transaction(s)`);
@@ -839,7 +866,7 @@ function recurringInput(b) {
   if (!amount) bad('Enter an amount');
   const name = str(b.name, 80); if (!name) bad('Name it');
   return { name, kind, amount, item_id: kind === 'transfer' ? null : b.item_id ? +b.item_id : null, account_id: b.account_id ? +b.account_id : null, to_account_id: kind === 'transfer' && b.to_account_id ? +b.to_account_id : null,
-    payee: str(b.payee, 120), rule: JSON.stringify(r), autopay: b.autopay ? 1 : 0, remind_days: Math.max(0, Math.min(30, +(b.remind_days ?? 2))), note: str(b.note, 500), active: b.active === false ? 0 : 1 };
+    payee: str(b.payee, 120), rule: JSON.stringify(r), autopay: b.autopay ? 1 : 0, remind_days: Math.max(0, Math.min(30, +(b.remind_days ?? 2))), note: str(b.note, 500), active: b.active === false ? 0 : 1, is_sub: b.is_sub ? 1 : 0 };
 }
 route('GET', '/api/recurring', () => {
   const t = today();
@@ -847,7 +874,7 @@ route('GET', '/api/recurring', () => {
 });
 route('POST', '/api/recurring', ({ body, origin }) => {
   const r = recurringInput(body);
-  const id = Number(q('INSERT INTO recurring(name, kind, amount, item_id, account_id, to_account_id, payee, rule, autopay, remind_days, note, active, created) VALUES (:name, :kind, :amount, :item_id, :account_id, :to_account_id, :payee, :rule, :autopay, :remind_days, :note, :active, :created)').run({ ...r, created: Date.now() }).lastInsertRowid);
+  const id = Number(q('INSERT INTO recurring(name, kind, amount, item_id, account_id, to_account_id, payee, rule, autopay, remind_days, note, active, is_sub, created) VALUES (:name, :kind, :amount, :item_id, :account_id, :to_account_id, :payee, :rule, :autopay, :remind_days, :note, :active, :is_sub, :created)').run({ ...r, created: Date.now() }).lastInsertRowid);
   if (r.item_id && body.set_plan) {
     for (const m of budgetMonths()) {
       const n = B.occurrences(JSON.parse(r.rule), `${m}-01`, B.lastDay(m)).length;
@@ -860,7 +887,7 @@ route('POST', '/api/recurring', ({ body, origin }) => {
 route('PUT', '/api/recurring/:id', ({ params, body, origin }) => {
   if (!q('SELECT 1 FROM recurring WHERE id = ?').get(+params.id)) notFound();
   const r = recurringInput(body);
-  q('UPDATE recurring SET name=:name, kind=:kind, amount=:amount, item_id=:item_id, account_id=:account_id, to_account_id=:to_account_id, payee=:payee, rule=:rule, autopay=:autopay, remind_days=:remind_days, note=:note, active=:active WHERE id=:id').run({ ...r, id: +params.id });
+  q('UPDATE recurring SET name=:name, kind=:kind, amount=:amount, item_id=:item_id, account_id=:account_id, to_account_id=:to_account_id, payee=:payee, rule=:rule, autopay=:autopay, remind_days=:remind_days, note=:note, active=:active, is_sub=:is_sub WHERE id=:id').run({ ...r, id: +params.id });
   changed(origin, 'recurring'); setImmediate(runAutopay);
   return { ok: true };
 });
@@ -906,8 +933,8 @@ route('POST', '/api/debts', ({ body, user, origin }) => {
   const id = tx(() => {
     const gid = ensureDebtGroup();
     const itemId = Number(q("INSERT INTO items(group_id, name, emoji, sort) VALUES (?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM items WHERE group_id = ?))").run(gid, name, str(body.emoji, 8) || '💳', gid).lastInsertRowid);
-    return Number(q('INSERT INTO debts(name, kind, balance, as_of, original, min_payment, due_day, item_id, note, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(name, str(body.kind, 30) || 'credit card', balance, B.isDate(body.as_of) ? body.as_of : today(), original, Math.abs(cents(body.min_payment || 0)), body.due_day ? Math.max(1, Math.min(31, +body.due_day)) : null, itemId, str(body.note, 500), Date.now()).lastInsertRowid);
+    return Number(q('INSERT INTO debts(name, kind, balance, as_of, original, min_payment, due_day, item_id, note, account_id, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(name, str(body.kind, 30) || 'credit card', balance, B.isDate(body.as_of) ? body.as_of : today(), original, Math.abs(cents(body.min_payment || 0)), body.due_day ? Math.max(1, Math.min(31, +body.due_day)) : null, itemId, str(body.note, 500), body.account_id ? +body.account_id : null, Date.now()).lastInsertRowid);
   });
   log(user.id, 'debt', `Added debt ${name} (${$(balance)})`);
   changed(origin, 'debts'); return { id };
@@ -920,6 +947,7 @@ route('PATCH', '/api/debts/:id', ({ params, body, user, origin }) => {
   if (body.due_day !== undefined) q('UPDATE debts SET due_day = ? WHERE id = ?').run(body.due_day ? Math.max(1, Math.min(31, +body.due_day)) : null, d.id);
   if (body.original !== undefined) q('UPDATE debts SET original = ? WHERE id = ?').run(Math.abs(cents(body.original)), d.id);
   if (body.note !== undefined) q('UPDATE debts SET note = ? WHERE id = ?').run(str(body.note, 500), d.id);
+  if (body.account_id !== undefined) q('UPDATE debts SET account_id = ? WHERE id = ?').run(body.account_id ? +body.account_id : null, d.id);
   if (body.archived !== undefined) { q('UPDATE debts SET archived = ? WHERE id = ?').run(body.archived ? 1 : 0, d.id); if (d.item_id) q('UPDATE items SET archived = ? WHERE id = ?').run(body.archived ? 1 : 0, d.item_id); }
   // "Update balance from statement": restart the running balance from today.
   if (body.balance !== undefined) {
@@ -1052,6 +1080,327 @@ route('GET', '/ics/:token', ({ params, req, res, query }) => {
   res.end(lines.join('\r\n') + '\r\n');
 }, { public: true, raw: true });
 
+// ================================================================= bank sync (SimpleFIN), review tray, subscriptions, insights
+// The SimpleFIN access URL is a credential: it's encrypted with a key kept in DATA_DIR/secret.key, which is not part of
+// the database or its off-server backups.
+const VAULT = SF.makeVault((() => {
+  const f = join(DATA, 'secret.key');
+  try { const k = readFileSync(f); if (k.length === 32) return k; } catch {}
+  const k = randomBytes(32); writeFileSync(f, k, { mode: 0o600 }); return k;
+})());
+const localDate = (unix) => new Date(unix * 1000).toLocaleDateString('sv', { timeZone: TZ });
+function forgetBank(t) { for (const b of [t?.bank_id, t?.bank_id2]) if (b) q('INSERT OR IGNORE INTO bank_ignored(bank_id) VALUES (?)').run(b); }
+const bankName = (raw) => { const c = SF.cleanPayee(raw); return q('SELECT name FROM payee_names WHERE key = ?').get(SF.payeeKey(c))?.name || c; };
+const sameMerchant = (a, b) => { const x = SF.payeeKey(a), y = SF.payeeKey(b); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 4 && (x.startsWith(y) || y.startsWith(x)))); };
+
+// Store one SimpleFIN /accounts response: new bank accounts, balances, and transactions (matched to anything
+// you already logged by hand, paired into transfers between your own accounts, everything else into the review tray).
+function importBankData(bl, data) {
+  const res = { added: 0, matched: 0, transfers: 0, accounts: 0, autoFiled: 0, newIds: [] };
+  tx(() => {
+    for (const a of data.accounts || []) {
+      const id = String(a.id), org = a.org?.name || a.org?.domain || '';
+      let bal = a.balance != null && a.balance !== '' ? B.parseMoney(a.balance) : null;
+      const avail = a['available-balance'] != null && a['available-balance'] !== '' ? B.parseMoney(a['available-balance']) : null;
+      let ba = q('SELECT * FROM bank_accounts WHERE id = ?').get(id), fresh = false;
+      const kindGuess = SF.guessKind(a.name, org);
+      if (kindGuess === 'credit' && bal > 0) bal = -bal; // owed on a card is negative in Ledger
+      if (!ba) {
+        const nm = String(a.name || 'Account').slice(0, 60);
+        let acct = q('SELECT id FROM accounts WHERE archived = 0 AND lower(name) = lower(?)').get(nm)?.id
+          ?? q('SELECT id FROM accounts WHERE archived = 0 AND kind = ? AND id NOT IN (SELECT account_id FROM bank_accounts WHERE account_id IS NOT NULL) ORDER BY sort, id LIMIT 1').get(kindGuess)?.id;
+        if (!acct) { acct = Number(q('INSERT INTO accounts(name, kind, start_balance, start_date, sort) VALUES (?, ?, 0, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM accounts))').run(nm, kindGuess, bl.start_date).lastInsertRowid); fresh = true; }
+        q('INSERT INTO bank_accounts(id, link_id, org, name, currency, balance, available, balance_date, account_id, enabled, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)')
+          .run(id, bl.id, org, nm, a.currency || 'USD', bal, avail, a['balance-date'] || null, acct, Date.now());
+        ba = q('SELECT * FROM bank_accounts WHERE id = ?').get(id);
+        res.accounts++; (res.linked ||= new Set()).add(id);
+        log(null, 'bank', `Linked ${org ? org + ' – ' : ''}${nm} to ${fresh ? 'a new' : 'your existing'} account “${q('SELECT name FROM accounts WHERE id = ?').get(acct).name}”`);
+      } else q('UPDATE bank_accounts SET balance = ?, available = ?, balance_date = ?, org = ? WHERE id = ?').run(bal, avail, a['balance-date'] || null, org, id);
+      if (!ba.enabled || !ba.account_id) continue;
+      for (const t of (a.transactions || []).sort((x, y) => (x.posted || 0) - (y.posted || 0))) {
+        if (t.pending || !t.posted) continue;
+        const bid = `${id}:${t.id}`;
+        if (q('SELECT 1 FROM txns WHERE bank_id = ? OR bank_id2 = ?').get(bid, bid) || q('SELECT 1 FROM bank_ignored WHERE bank_id = ?').get(bid)) continue;
+        const amt = B.parseMoney(t.amount);
+        if (!amt) continue;
+        const date = localDate(t.transacted_at || t.posted);
+        if (date < bl.start_date) continue;
+        const kind = amt < 0 ? 'expense' : 'income', abs = Math.abs(amt);
+        const raw = String(t.payee || t.description || t.memo || '').trim().slice(0, 300), name = bankName(raw) || 'Bank transaction';
+        // 1) Something you already logged (phone quick-add, autopay, CSV): attach the bank record instead of duplicating.
+        const m = q(`SELECT id, payee, account_id, date FROM txns WHERE bank_id IS NULL AND kind = ? AND amount = ? AND date BETWEEN ? AND ?`).all(kind, abs, B.addDays(date, -6), B.addDays(date, 3))
+          .sort((x, y) => sameMerchant(y.payee, name) - sameMerchant(x.payee, name) || (y.account_id === ba.account_id) - (x.account_id === ba.account_id) || Math.abs(B.dayDiff(x.date, date)) - Math.abs(B.dayDiff(y.date, date)))[0];
+        if (m) { q('UPDATE txns SET bank_id = ?, raw_payee = ?, account_id = ?, cleared = 1 WHERE id = ?').run(bid, raw, ba.account_id, m.id); res.matched++; continue; }
+        // 2) New: suggest a category from what you've filed this payee under before (or the bill it pays).
+        let sug = payeeItem(name, kind);
+        if (!sug && kind === 'expense') { const r = recurringList().find((r) => r.active && r.kind === 'expense' && r.item_id && sameMerchant(r.payee || r.name, name)); if (r) sug = itemsFlat().find((i) => i.id === r.item_id) || null; }
+        const uses = sug ? q('SELECT uses FROM payees WHERE key = ?').get(name.toLowerCase())?.uses || 0 : 0;
+        // A scheduled bill or payday this pays: mark it paid now and suggest its category.
+        const bill = scheduled(B.addDays(date, -6), B.addDays(date, 6)).filter((x) => x.type === 'bill' && x.kind === kind && x.status !== 'paid' && x.status !== 'skipped'
+          && (sameMerchant(x.payee || x.name, name) || Math.abs(x.amount - abs) <= Math.max(100, x.amount * 0.02)) && (sameMerchant(x.payee || x.name, name) || !x.account_id || x.account_id === ba.account_id))
+          .sort((x, y) => sameMerchant(y.payee || y.name, name) - sameMerchant(x.payee || x.name, name) || Math.abs(x.amount - abs) - Math.abs(y.amount - abs) || Math.abs(B.dayDiff(x.date, date)) - Math.abs(B.dayDiff(y.date, date)))[0];
+        if (bill?.item_id && !sug) sug = itemsFlat().find((i) => i.id === bill.item_id) || null;
+        const history = date < `${settings().start_month}-01`; // before the budget starts: kept for history and subscription detection only
+        const auto = !history && !!(bl.auto_approve && sug && uses >= 2);
+        const n = saveTxn(null, { date, kind, amount: abs, payee: name, account_id: ba.account_id, lines: [{ item_id: auto ? sug.id : null, amount: abs }], cleared: true, source: 'bank',
+          reviewed: auto || history, suggest_item_id: sug?.id ?? null, bank_id: bid, raw_payee: raw, quiet: true, autolink: false,
+          ...(bill && !history ? { recurring_id: bill.id, occ_date: bill.date } : {}) }, null, null);
+        res.added++; if (auto) res.autoFiled++;
+        // 3) Money moving between two of your linked accounts (card payment, savings transfer): one transfer, not spending + income.
+        const c = q(`SELECT id, bank_id, raw_payee, account_id, kind FROM txns WHERE bank_id IS NOT NULL AND bank_id2 IS NULL AND id != ? AND kind = ? AND amount = ? AND account_id != ?
+          AND account_id IN (SELECT account_id FROM bank_accounts WHERE enabled = 1) AND date BETWEEN ? AND ? AND reviewed = 0 ORDER BY abs(julianday(date) - julianday(?)) LIMIT 1`)
+          .get(n.id, kind === 'expense' ? 'income' : 'expense', abs, ba.account_id, B.addDays(date, -4), B.addDays(date, 4), date);
+        if (c && (SF.looksLikeTransfer(raw) || SF.looksLikeTransfer(c.raw_payee))) {
+          const [out, inn] = kind === 'expense' ? [n, c] : [c, n];
+          q('DELETE FROM txns WHERE id = ?').run(inn.id);
+          q("UPDATE txns SET kind = 'transfer', to_account_id = ?, bank_id2 = ?, suggest_item_id = NULL WHERE id = ?").run(inn.account_id, inn.bank_id, out.id);
+          q('DELETE FROM lines WHERE txn_id = ?').run(out.id);
+          res.transfers++; res.added--;
+          res.newIds = res.newIds.filter((x) => x !== inn.id);
+          continue;
+        }
+        res.newIds.push(n.id);
+      }
+      // A newly linked account starts exactly at the bank's balance.
+      if (res.linked?.has(id) && bal != null) {
+        const cur = accounts('9999-12-31', { all: true }).find((x) => x.id === ba.account_id)?.balance ?? 0;
+        q('UPDATE accounts SET start_balance = start_balance + ? WHERE id = ?').run(bal - cur, ba.account_id);
+      }
+    }
+  });
+  return res;
+}
+
+let bankBusy = false;
+async function syncBank({ force = false, linkId = null } = {}) {
+  if (bankBusy) return { busy: true };
+  bankBusy = true;
+  const total = { added: 0, matched: 0, transfers: 0, accounts: 0, autoFiled: 0, errors: [], bankErrors: [] };
+  try {
+    for (const bl of q('SELECT * FROM bank_links').all()) {
+      if (linkId && bl.id !== linkId) continue;
+      if (!force && bl.last_sync && Date.now() - bl.last_sync < 30 * 60000) continue;
+      q('UPDATE bank_links SET last_sync = ? WHERE id = ?').run(Date.now(), bl.id);
+      let access;
+      try { access = VAULT.open(bl.access); }
+      catch { q('UPDATE bank_links SET last_error = ? WHERE id = ?').run('Ledger can’t read the saved connection (secret.key changed). Reconnect in Settings → Bank sync.', bl.id); continue; }
+      try {
+        const from = bl.last_ok ? B.addDays(new Date(bl.last_ok).toLocaleDateString('sv', { timeZone: TZ }), -10) : bl.start_date;
+        const start = Math.floor(Date.parse(`${from < bl.start_date ? bl.start_date : from}T00:00:00Z`) / 1000) - 86400;
+        const data = await SF.fetchAccounts(access, { start });
+        const r = importBankData(bl, data);
+        for (const k of ['added', 'matched', 'transfers', 'accounts', 'autoFiled']) total[k] += r[k];
+        total.bankErrors.push(...data.errors);
+        q('UPDATE bank_links SET last_ok = ?, last_error = NULL, errors = ? WHERE id = ?').run(Date.now(), JSON.stringify(data.errors), bl.id);
+        if (r.added || r.matched || r.transfers) log(null, 'bank', `Bank sync: ${r.added} new, ${r.matched} matched to entries you logged, ${r.transfers} transfer(s)${r.autoFiled ? `, ${r.autoFiled} auto-filed` : ''}`);
+        setImmediate(() => bankAlerts(r.newIds).catch((e) => console.warn(`[bank] alerts: ${e.message}`)));
+      } catch (e) {
+        total.errors.push(e.message);
+        q('UPDATE bank_links SET last_error = ? WHERE id = ?').run(e.message, bl.id);
+        console.warn(`[bank] ${e.message}`);
+        if (once(`bankerr:${bl.id}:${today()}`)) notifyAll('bank', '⚠️ Bank sync problem', e.message, { url: link('/settings') }).catch(() => {});
+      }
+    }
+  } finally { bankBusy = false; }
+  if (total.added || total.matched || total.transfers || total.accounts) { changed(null, 'txns'); setImmediate(() => checkPaidOff().catch(() => {})); }
+  return total;
+}
+
+// Rocket-Money-style alerts for freshly imported charges.
+async function bankAlerts(ids) {
+  const s = settings(), t0 = today();
+  const fresh = ids.map(getTxn).filter((t) => t && t.kind === 'expense');
+  if (fresh.length) {
+    const hist = q("SELECT id, date, amount, payee FROM txns WHERE kind = 'expense' AND date >= ?").all(B.addDays(t0, -400));
+    for (const t of fresh) {
+      // Subscription price changes and charges after you cancelled.
+      for (const r of recurringList().filter((r) => r.kind === 'expense' && sameMerchant(r.payee || r.name, t.payee))) {
+        if (r.cancelled_on && t.date > r.cancelled_on && once(`aftercancel:${t.id}`))
+          await notifyAll('bank', `🚫 ${r.name} charged you after you cancelled`, `${$(t.amount)} on ${t.date}. You marked it cancelled on ${r.cancelled_on} – contact them for a refund.`, { priority: 'high', url: link('/subs') });
+        else if (r.active && (r.is_sub || INS.isSubscriptionName(r.name)) && Math.abs(t.amount - r.amount) >= Math.max(50, r.amount * 0.01) && once(`price:${r.id}:${t.amount}`)) {
+          await notifyAll('bank', `📈 ${r.name} ${t.amount > r.amount ? 'went up' : 'changed'}: ${$(r.amount)} → ${$(t.amount)}`, `That's ${$(Math.abs(t.amount - r.amount) * B.occurrences(r.rule, t0, B.addDays(t0, 364)).length)} a year${t.amount > r.amount ? ' more' : ''}. Ledger updated the expected amount.`, { url: link('/subs') });
+          q('UPDATE recurring SET amount = ? WHERE id = ?').run(t.amount, r.id);
+          log(null, 'bill', `${r.name} price changed from ${$(r.amount)} to ${$(t.amount)}`);
+        }
+      }
+      const odd = INS.isUnusual(t, hist, s.large_charge);
+      if (odd && once(`unusual:${t.id}`)) await notifyAll('bank', `👀 ${odd.reason === 'large charge' ? 'Large charge' : 'Unusual charge'}: ${t.payee} ${$(t.amount)}`, `${t.date}${odd.typical ? ` – usually about ${$(odd.typical)}` : ''}. Not you? Call your bank.`, { url: link('/inbox') });
+    }
+    for (const [a, b] of INS.findDuplicates(hist.filter((h) => B.dayDiff(h.date, t0) <= 10), 2)) {
+      if (!fresh.some((t) => t.id === a.id || t.id === b.id) || !once(`dup:${a.id}:${b.id}`)) continue;
+      await notifyAll('bank', `⚠️ Possible double charge: ${b.payee}`, `${$(b.amount)} on ${a.date} and again on ${b.date}. If that wasn't two purchases, ask the merchant for a refund.`, { url: link('/inbox') });
+    }
+  }
+  // Low balance on checking/savings that come from the bank.
+  for (const b of q("SELECT ba.*, a.name AS acct, a.kind FROM bank_accounts ba JOIN accounts a ON a.id = ba.account_id WHERE ba.enabled = 1 AND a.kind IN ('checking','savings','cash') AND ba.balance IS NOT NULL").all())
+    if (s.low_balance && b.balance < s.low_balance && once(`lowbal:${b.id}:${t0}`)) await notifyAll('bank', `🪫 ${b.acct} is low: ${$(b.balance)}`, `Below your ${$(s.low_balance)} warning level. Upcoming bills are on the Ledger calendar.`, { priority: 'high', url: link('/calendar/agenda') });
+}
+
+// ---- subscriptions & recurring charges
+const perYear = (rule) => ({ daily: 365, weekly: 52, monthly: 12, semimonthly: 24, yearly: 1, once: 0 }[rule.freq] || 0) / (+rule.interval || 1);
+function subscriptionsView() {
+  const t = today();
+  const hist = q(`SELECT t.id, t.date, t.amount, t.payee, (SELECT item_id FROM lines l WHERE l.txn_id = t.id LIMIT 1) AS item_id FROM txns t WHERE t.kind = 'expense' AND t.date >= ?`).all(B.addDays(t, -400));
+  const det = INS.detectRecurring(hist, t);
+  const recs = recurringList().filter((r) => r.kind === 'expense');
+  const items = new Map(itemsFlat().map((i) => [i.id, i]));
+  const list = recs.map((r) => {
+    const d = det.find((x) => sameMerchant(x.payee, r.payee || r.name));
+    const last = q('SELECT date, amount FROM txns WHERE recurring_id = ? ORDER BY date DESC LIMIT 1').get(r.id) || (d ? { date: d.last, amount: d.amount } : null);
+    const py = perYear(r.rule);
+    return { id: r.id, name: r.name, payee: r.payee, amount: r.amount, is_sub: !!r.is_sub || INS.isSubscriptionName(r.name), active: r.active, cancelled_on: r.cancelled_on, autopay: r.autopay,
+      describe: B.describeRule(r.rule), next: r.active ? B.occurrences(r.rule, t, B.addDays(t, 800))[0] || null : null, item_name: items.get(r.item_id)?.name || null,
+      monthly: Math.round(r.amount * py / 12), yearly: Math.round(r.amount * py), last, change: d?.change || null, cancel_url: INS.cancelUrl(r.name), remind_days: r.remind_days };
+  });
+  // Already tracked if the name matches, or a bill with the same cadence charges about the same amount.
+  const covered = (d) => recs.some((r) => sameMerchant(d.payee, r.payee || r.name) || (r.active && Math.abs(r.amount - d.amount) <= Math.max(100, d.amount * 0.05) && Math.abs(perYear(r.rule) - d.perYear) < 0.5));
+  const detected = det.filter((d) => !covered(d) && !q('SELECT 1 FROM kv WHERE k = ?').get(`subdismiss:${d.key}`))
+    .map((d) => ({ ...d, item_name: items.get(d.item_id)?.name || null, cancel_url: INS.cancelUrl(d.payee) }));
+  const active = list.filter((x) => x.active);
+  const sum = (arr, k) => arr.reduce((a, x) => a + x[k], 0);
+  return { list, detected, totals: { subsMonthly: sum(active.filter((x) => x.is_sub), 'monthly'), subsYearly: sum(active.filter((x) => x.is_sub), 'yearly'), billsMonthly: sum(active, 'monthly'),
+    savedYearly: sum(list.filter((x) => x.cancelled_on), 'yearly') } };
+}
+
+// ---- spending insights (Home card + Sunday notification)
+function insights() {
+  const t = today(), m = t.slice(0, 7), dom = +t.slice(8), pm = B.addMonths(m, -1);
+  const [py, pmo] = pm.split('-').map(Number), pSame = B.ymd(py, pmo, Math.min(dom, B.daysIn(py, pmo)));
+  const spend = (from, to) => q(`SELECT COALESCE(SUM(CASE WHEN t.kind = 'income' THEN -l.amount ELSE l.amount END), 0) v FROM lines l JOIN txns t ON t.id = l.txn_id
+    LEFT JOIN items i ON i.id = l.item_id LEFT JOIN groups g ON g.id = i.group_id WHERE t.kind != 'transfer' AND (l.item_id IS NULL AND t.kind = 'expense' OR g.kind = 'expense') AND t.date BETWEEN ? AND ?`).get(from, to).v;
+  const byItem = (from, to) => new Map(q(`SELECT l.item_id, SUM(CASE WHEN t.kind = 'income' THEN -l.amount ELSE l.amount END) v FROM lines l JOIN txns t ON t.id = l.txn_id JOIN items i ON i.id = l.item_id JOIN groups g ON g.id = i.group_id
+    WHERE g.kind = 'expense' AND g.is_debt = 0 AND t.kind != 'transfer' AND t.date BETWEEN ? AND ? GROUP BY l.item_id`).all(from, to).map((r) => [r.item_id, r.v]));
+  const week = spend(B.addDays(t, -6), t);
+  const prior = [1, 2, 3, 4].map((k) => spend(B.addDays(t, -6 - 7 * k), B.addDays(t, -7 * k)));
+  const typicalWeek = Math.round(prior.reduce((a, b) => a + b, 0) / 4);
+  const now = byItem(`${m}-01`, t), before = byItem(`${pm}-01`, pSame), items = new Map(itemsFlat().map((i) => [i.id, i]));
+  const changes = [...new Set([...now.keys(), ...before.keys()])].map((id) => ({ id, name: items.get(id)?.name, emoji: items.get(id)?.emoji, now: now.get(id) || 0, before: before.get(id) || 0 }))
+    .map((x) => ({ ...x, diff: x.now - x.before })).filter((x) => x.name && x.before > 0 && Math.abs(x.diff) >= 2000).sort((a, b) => b.diff - a.diff);
+  const renewals = scheduled(t, B.addDays(t, 7)).filter((s) => s.type === 'bill' && s.is_sub && s.status !== 'paid' && s.status !== 'skipped');
+  return { week, typicalWeek, mtd: spend(`${m}-01`, t), lastMtd: spend(`${pm}-01`, pSame), up: changes.filter((x) => x.diff > 0).slice(0, 3), down: changes.filter((x) => x.diff < 0).slice(-3).reverse(), renewals, monthLabel: B.monthLabel(pm, 'short') };
+}
+function insightsMessage() {
+  const i = insights();
+  if (!i.week && !i.mtd) return null;
+  const pct = (a, b) => (b ? `${a >= b ? '+' : '−'}${Math.round(Math.abs(a - b) / b * 100)}%` : '');
+  const lines = [`This week: ${$(i.week)} spent${i.typicalWeek ? ` (typical week ${$(i.typicalWeek)}, ${pct(i.week, i.typicalWeek)})` : ''}.`,
+    `Month so far: ${$(i.mtd)} vs ${$(i.lastMtd)} by this point in ${i.monthLabel} ${pct(i.mtd, i.lastMtd)}.`];
+  if (i.up.length) lines.push(`Up most: ${i.up.map((x) => `${x.name} +${$(x.diff)}`).join(', ')}.`);
+  if (i.renewals.length) lines.push(`Renewing this week: ${i.renewals.map((r) => `${r.name} ${$(r.amount)} (${r.date.slice(5)})`).join(', ')}.`);
+  const inbox = q('SELECT COUNT(*) c FROM txns WHERE reviewed = 0').get().c;
+  if (inbox) lines.push(`📥 ${inbox} bank transaction${inbox > 1 ? 's' : ''} waiting to be categorized.`);
+  return { title: '📊 Your week in money', body: lines.join('\n') };
+}
+
+// ---- net worth over time (account balances at each month end, minus snowball debts not tracked as accounts)
+function netWorth() {
+  const t = today(), months = B.monthsBetween(B.addMonths(t.slice(0, 7), -11), t.slice(0, 7));
+  const debts = debtList();
+  return months.map((m) => {
+    const end = m === t.slice(0, 7) ? t : B.lastDay(m);
+    const acc = accounts(end);
+    const assets = acc.filter((a) => a.kind !== 'credit').reduce((s, a) => s + a.balance, 0), cards = acc.filter((a) => a.kind === 'credit').reduce((s, a) => s + a.balance, 0);
+    let owed = 0;
+    for (const d of debts) {
+      if (d.account_id || d.as_of > end) continue; // a linked debt is already counted as a (credit) account
+      const later = q(`SELECT COALESCE(SUM(CASE WHEN t.kind = 'income' THEN -l.amount ELSE l.amount END), 0) v FROM lines l JOIN txns t ON t.id = l.txn_id WHERE l.item_id = ? AND t.kind != 'transfer' AND t.date > ?`).get(d.item_id, end).v;
+      const laterAdj = q('SELECT COALESCE(SUM(amount), 0) v FROM debt_adjust WHERE debt_id = ? AND date > ?').get(d.id, end).v;
+      owed += Math.max(0, d.current + later - laterAdj);
+    }
+    return { month: m, date: end, assets, cards, debts: owed, net: assets + cards - owed };
+  });
+}
+
+// ---- routes
+const bankState = () => ({
+  links: q('SELECT id, label, start_date, auto_approve, last_sync, last_ok, last_error, errors, created FROM bank_links ORDER BY id').all().map((l) => ({ ...l, errors: JSON.parse(l.errors || '[]'), auto_approve: !!l.auto_approve })),
+  accounts: q('SELECT ba.*, a.name AS account_name, a.kind AS account_kind FROM bank_accounts ba LEFT JOIN accounts a ON a.id = ba.account_id ORDER BY ba.org, ba.name').all(),
+  inbox: q('SELECT COUNT(*) c FROM txns WHERE reviewed = 0').get().c, busy: bankBusy,
+});
+route('GET', '/api/bank', () => bankState());
+route('POST', '/api/bank/connect', async ({ body, user }) => {
+  const start = B.isDate(body.start_date) ? body.start_date : `${settings().start_month}-01`;
+  let access;
+  try { access = await SF.claim(body.token); } catch (e) { bad(e.message); }
+  const id = Number(q('INSERT INTO bank_links(access, label, start_date, auto_approve, created) VALUES (?, ?, ?, ?, ?)').run(VAULT.seal(access), str(body.label || 'SimpleFIN', 60), start, body.auto_approve ? 1 : 0, Date.now()).lastInsertRowid);
+  log(user.id, 'bank', `Connected bank sync (SimpleFIN), importing from ${start}`);
+  const r = await syncBank({ force: true, linkId: id });
+  return { ...r, state: bankState() };
+});
+route('POST', '/api/bank/sync', async () => ({ ...(await syncBank({ force: true })), state: bankState() }));
+route('PATCH', '/api/bank/links/:id', ({ params, body }) => {
+  if (body.start_date !== undefined && B.isDate(body.start_date)) q('UPDATE bank_links SET start_date = ?, last_ok = NULL WHERE id = ?').run(body.start_date, +params.id);
+  if (body.auto_approve !== undefined) q('UPDATE bank_links SET auto_approve = ? WHERE id = ?').run(body.auto_approve ? 1 : 0, +params.id);
+  return bankState();
+});
+route('DELETE', '/api/bank/links/:id', ({ params, user }) => {
+  q('DELETE FROM bank_links WHERE id = ?').run(+params.id);
+  log(user.id, 'bank', 'Disconnected bank sync (imported transactions were kept)');
+  return bankState();
+});
+route('PATCH', '/api/bank/accounts/:id', ({ params, body, user, origin }) => {
+  const ba = q('SELECT * FROM bank_accounts WHERE id = ?').get(params.id); if (!ba) notFound();
+  if (body.enabled !== undefined) q('UPDATE bank_accounts SET enabled = ? WHERE id = ?').run(body.enabled ? 1 : 0, ba.id);
+  if (body.account_id !== undefined) {
+    let acct = body.account_id === 'new' ? Number(q('INSERT INTO accounts(name, kind, sort) VALUES (?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM accounts))').run(ba.name, SF.guessKind(ba.name, ba.org)).lastInsertRowid) : +body.account_id || null;
+    q('UPDATE bank_accounts SET account_id = ? WHERE id = ?').run(acct, ba.id);
+    q('UPDATE txns SET account_id = ? WHERE bank_id LIKE ?').run(acct, `${ba.id}:%`);
+    if (acct && ba.balance != null && body.align !== false) { // start this account at the bank's balance
+      const cur = accounts('9999-12-31', { all: true }).find((x) => x.id === acct)?.balance ?? 0;
+      q('UPDATE accounts SET start_balance = start_balance + ? WHERE id = ?').run(ba.balance - cur, acct);
+    }
+    log(user.id, 'bank', `${ba.name} now feeds ${acct ? q('SELECT name FROM accounts WHERE id = ?').get(acct).name : 'nothing'}`);
+  }
+  changed(origin, 'accounts');
+  return bankState();
+});
+// Review tray (EveryDollar's "New" transactions): approve with a category, rename, split, or ignore.
+route('GET', '/api/inbox', () => listTxns({ inbox: true, limit: 300 }).map((t) => ({ ...t, suggest_name: t.suggest_item_id ? itemsFlat().find((i) => i.id === t.suggest_item_id)?.name : null })));
+route('POST', '/api/inbox/approve', ({ body, user, origin }) => {
+  const done = [];
+  tx(() => {
+    for (const a of Array.isArray(body.items) ? body.items : []) {
+      const t = getTxn(+a.id); if (!t) continue;
+      const item = a.item_id !== undefined ? (a.item_id ? +a.item_id : null) : t.lines.length === 1 && !t.lines[0].item_id ? t.suggest_item_id : undefined;
+      const upd = { reviewed: true, quiet: true };
+      if (a.payee) upd.payee = a.payee;
+      if (t.kind !== 'transfer' && item !== undefined && t.lines.length <= 1) upd.lines = [{ item_id: item, amount: t.amount }];
+      if (t.kind !== 'transfer' && !(upd.lines?.[0]?.item_id || t.lines.some((l) => l.item_id))) continue; // needs a category first
+      done.push(saveTxn(user.id, upd, t.id, origin).id);
+    }
+  });
+  changed(origin, 'txns'); setImmediate(() => checkPaidOff().catch(() => {}));
+  return { approved: done.length, ids: done };
+});
+route('POST', '/api/inbox/approve-suggested', ({ user, origin }) => {
+  let n = 0;
+  tx(() => { for (const t of listTxns({ inbox: true, limit: 1000 })) if (t.reviewed === 0 && t.kind !== 'transfer' && t.lines.length === 1 && !t.lines[0].item_id && t.suggest_item_id) { saveTxn(user.id, { reviewed: true, quiet: true, lines: [{ item_id: t.suggest_item_id, amount: t.amount }] }, t.id, origin); n++; } });
+  changed(origin, 'txns'); setImmediate(() => checkPaidOff().catch(() => {}));
+  return { approved: n };
+});
+route('GET', '/api/inbox/count', () => ({ count: q("SELECT COUNT(*) c FROM txns t WHERE t.reviewed = 0 OR (t.kind != 'transfer' AND t.date >= ? AND EXISTS (SELECT 1 FROM lines l WHERE l.txn_id = t.id AND l.item_id IS NULL))").get(`${settings().start_month}-01`).c }));
+route('GET', '/api/subscriptions', () => subscriptionsView());
+route('POST', '/api/subscriptions/track', ({ body, origin }) => {
+  if (!B.isDate(body.next)) bad('next date required');
+  const rule = { freq: body.freq === 'weekly' || body.freq === 'yearly' ? body.freq : 'monthly', interval: Math.max(1, +body.interval || 1), start: body.next };
+  if (rule.freq === 'monthly') rule.day = +body.next.slice(8);
+  const id = Number(q('INSERT INTO recurring(name, kind, amount, item_id, payee, rule, autopay, remind_days, is_sub, active, created) VALUES (?, \'expense\', ?, ?, ?, ?, 0, ?, ?, 1, ?)')
+    .run(str(body.name || body.payee, 80), Math.abs(cents(body.amount)), body.item_id ? +body.item_id : null, str(body.payee, 120), JSON.stringify(rule), body.is_sub ? 3 : 2, body.is_sub ? 1 : 0, Date.now()).lastInsertRowid);
+  changed(origin, 'recurring');
+  return { id };
+});
+route('POST', '/api/subscriptions/dismiss', ({ body }) => { setKv(`subdismiss:${str(body.key, 120)}`, '1'); return { ok: true }; });
+route('POST', '/api/recurring/:id/cancel', ({ params, body, user, origin }) => {
+  const r = q('SELECT * FROM recurring WHERE id = ?').get(+params.id); if (!r) notFound();
+  if (body.undo) q('UPDATE recurring SET active = 1, cancelled_on = NULL WHERE id = ?').run(r.id);
+  else q('UPDATE recurring SET active = 0, cancelled_on = ? WHERE id = ?').run(B.isDate(body.date) ? body.date : today(), r.id);
+  log(user.id, 'bill', `${body.undo ? 'Restored' : 'Cancelled'} ${r.name}`);
+  changed(origin, 'recurring');
+  return { ok: true };
+});
+route('GET', '/api/insights', () => insights());
+route('GET', '/api/networth', () => netWorth());
+
 // ---- notifications settings
 route('GET', '/api/notify', ({ user }) => ({ prefs: prefsOf(q('SELECT prefs FROM users WHERE id = ?').get(user.id)), smtp: smtpConfigured(), pushover: pushoverConfigured() }));
 route('PUT', '/api/notify', ({ user, body }) => {
@@ -1073,7 +1422,8 @@ const authCodes = new Map(), authRequests = new Map();
 const MCP_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
 const MCP_INSTRUCTIONS = `Ledger is the household's zero-based envelope budget with a debt snowball. Amounts are in US dollars.
 When the user says they spent, paid, bought or received money, call log_transaction right away with the amount, payee and the best-matching budget category (call list_categories if unsure). Afterwards tell them briefly what was logged and how much is left in that category.
-Use budget_status to answer "how much is left / can I afford" questions, upcoming_bills for what's due, and debt_snowball for debt progress. Today is ${'${today}'} (${TZ}).`;
+Use budget_status to answer "how much is left / can I afford" questions, upcoming_bills for what's due, and debt_snowball for debt progress.
+Bank transactions arrive automatically; new_transactions lists what needs a category and categorize_transaction files them. subscriptions and spending_insights cover recurring charges and trends. Today is ${'${today}'} (${TZ}).`;
 function tokenUser(req, kinds) {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
   if (!m) return null;
@@ -1191,7 +1541,7 @@ route('POST', '/oauth/token', ({ req, res, body }) => {
   return oauthError(res, 400, 'unsupported_grant_type', 'Use authorization_code or refresh_token');
 }, { public: true, raw: true });
 
-const toolDeps = { q, saveTxn, monthView, itemsFlat, payeeItem, listTxns, upcoming, debtSummary, moveMoney: (uid, m, f, t, a) => moveMoney(uid, m, f, t, a, null), today };
+const toolDeps = { q, saveTxn, monthView, itemsFlat, payeeItem, listTxns, upcoming, debtSummary, moveMoney: (uid, m, f, t, a) => moveMoney(uid, m, f, t, a, null), today, subscriptions: () => subscriptionsView(), insights: () => insights() };
 async function mcpHandle(msg, user) {
   const { id, method, params = {} } = msg || {};
   const reply = (result) => ({ jsonrpc: '2.0', id, result });
@@ -1365,6 +1715,8 @@ if (process.env.NODE_ENV !== 'test') {
   setInterval(() => backup().catch((e) => console.warn(`[backup] ${e.message}`)), 3600000).unref();
   setTimeout(() => backup().catch((e) => console.warn(`[backup] ${e.message}`)), 60000).unref();
   setInterval(() => notificationTick().catch((e) => console.warn(`[notify] ${e.message}`)), 60000).unref();
+  setInterval(() => syncBank().catch((e) => console.warn(`[bank] ${e.message}`)), Math.max(1, +(process.env.BANK_SYNC_HOURS || 6)) * 3600000).unref();
+  setTimeout(() => syncBank().catch((e) => console.warn(`[bank] ${e.message}`)), 90000).unref();
 }
 server.keepAliveTimeout = 65000;
 server.listen(PORT, HOST, () => console.log(`Ledger listening on http://${HOST}:${PORT}  (data: ${DATA}, tz: ${TZ})`));
@@ -1372,4 +1724,4 @@ const shutdown = () => { server.close(); for (const c of clients) c.res.end(); s
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-export { server, store, runAutopay, monthView, debtSummary, cashflow, scheduled };
+export { server, store, runAutopay, monthView, debtSummary, cashflow, scheduled, syncBank, importBankData };
